@@ -1,18 +1,22 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Header, Response
 from pydantic import BaseModel
+from typing import Optional
 
 app = FastAPI()
 
 # ============================================
-# MODELOS PYDANTIC (para validar el body JSON)
+# MODELOS PYDANTIC
 # ============================================
+
+class AddItemRequest(BaseModel):
+    productId: str
+    quantity: int = 1
 
 class CheckoutRequest(BaseModel):
     userId: str
-    idempotencyKey: str
 
 # ============================================
-# ALMACENAMIENTO EN MEMORIA (para el mock)
+# ALMACENAMIENTO EN MEMORIA
 # ============================================
 
 carts = {}
@@ -30,7 +34,7 @@ async def get_cart(userId: str):
             "userId": userId,
             "status": "ACTIVE",
             "items": [],
-            "total": 0
+            "totalAmount": 0
         }
     return carts[userId]
 
@@ -39,33 +43,33 @@ async def get_cart(userId: str):
 # ============================================
 
 @app.post("/cart/{userId}/items")
-async def add_item(userId: str, productId: str = None, quantity: int = 1):
+async def add_item(userId: str, data: AddItemRequest):
     if userId not in carts:
         carts[userId] = {
             "id": f"carrito-{userId}",
             "userId": userId,
             "status": "ACTIVE",
             "items": [],
-            "total": 0
+            "totalAmount": 0
         }
 
     new_item = {
-        "productId": productId,
-        "quantity": quantity,
-        "price": 14990,
-        "subtotal": quantity * 14990
+        "productId": data.productId,
+        "quantity": data.quantity,
+        "unitPrice": 14990,
+        "subtotal": data.quantity * 14990
     }
 
     carts[userId]["items"].append(new_item)
-    carts[userId]["total"] = sum(item["subtotal"] for item in carts[userId]["items"])
+    carts[userId]["totalAmount"] = sum(item["subtotal"] for item in carts[userId]["items"])
 
     return carts[userId]
 
 # ============================================
-# ENDPOINT 3: Eliminar producto
+# ENDPOINT 3: Eliminar producto — 204 sin body
 # ============================================
 
-@app.delete("/cart/{userId}/items/{productId}")
+@app.delete("/cart/{userId}/items/{productId}", status_code=204)
 async def delete_item(userId: str, productId: str):
     if userId not in carts:
         raise HTTPException(status_code=404, detail="Cart not found")
@@ -74,24 +78,26 @@ async def delete_item(userId: str, productId: str):
         item for item in carts[userId]["items"]
         if item["productId"] != productId
     ]
-    carts[userId]["total"] = sum(item["subtotal"] for item in carts[userId]["items"])
+    carts[userId]["totalAmount"] = sum(item["subtotal"] for item in carts[userId]["items"])
 
-    return {"status": 204, "message": "Item eliminado"}
+    return Response(status_code=204)
 
 # ============================================
-# ENDPOINT 4: Checkout (EL IMPORTANTE)
+# ENDPOINT 4: Checkout — Idempotency-Key en HEADER
 # ============================================
 
 @app.post("/checkout", status_code=201)
-async def checkout(data: CheckoutRequest):
+async def checkout(
+    data: CheckoutRequest,
+    idempotency_key: Optional[str] = Header(None, alias="Idempotency-Key")
+):
     userId = data.userId
-    idempotencyKey = data.idempotencyKey
+    idempotencyKey = idempotency_key
 
-    # VALIDACIÓN 1: Datos presentes
     if not userId or not idempotencyKey:
-        raise HTTPException(status_code=400, detail="userId y idempotencyKey requeridos")
+        raise HTTPException(status_code=400, detail="userId y Idempotency-Key requeridos")
 
-    # VALIDACIÓN 2: IDEMPOTENCIA
+    # IDEMPOTENCIA
     if idempotencyKey in checkout_attempts:
         existing = checkout_attempts[idempotencyKey]
         if existing["status"] == "SUCCESS":
@@ -104,17 +110,16 @@ async def checkout(data: CheckoutRequest):
                 }
             )
 
-    # VALIDACIÓN 3: Carrito no vacío
+    # Carrito no vacío
     if userId not in carts or len(carts[userId]["items"]) == 0:
         raise HTTPException(status_code=400, detail="Carrito vacío")
 
-    # CREAR PEDIDO
     orderId = f"ORD-{len(checkout_attempts) + 1001}"
 
     checkout_attempts[idempotencyKey] = {
         "orderId": orderId,
         "status": "SUCCESS",
-        "totalAmount": carts[userId]["total"]
+        "totalAmount": carts[userId]["totalAmount"]
     }
 
     carts[userId]["status"] = "CHECKED_OUT"
@@ -122,7 +127,7 @@ async def checkout(data: CheckoutRequest):
     return {
         "orderId": orderId,
         "status": "CREATED",
-        "totalAmount": carts[userId]["total"]
+        "totalAmount": carts[userId]["totalAmount"]
     }
 
 # ============================================
