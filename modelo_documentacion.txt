@@ -1,0 +1,271 @@
+================================================================
+DOCUMENTACIÓN DEL MODELO DE DATOS — CARRITO DE COMPRAS
+Proyecto: grupo4-carrito
+Persona 3 → entrega a Persona 4
+================================================================
+
+
+----------------------------------------------------------------
+TABLA: carts
+----------------------------------------------------------------
+Propósito general:
+    Representa un carrito de compras asociado a un usuario.
+    Es la entidad central del sistema: los ítems y los intentos
+    de checkout dependen de ella.
+
+Columnas:
+    id
+        Tipo        : UUID
+        Restricción : PRIMARY KEY, DEFAULT gen_random_uuid()
+        Descripción : Identificador único del carrito.
+        Por qué     : Usar UUID en lugar de entero secuencial
+                      evita que terceros adivinen IDs de otros
+                      carritos. gen_random_uuid() lo genera
+                      automáticamente sin coordinación entre
+                      servicios.
+
+    user_id
+        Tipo        : TEXT
+        Restricción : NOT NULL
+        Descripción : ID del usuario dueño del carrito.
+        Por qué     : Se usa TEXT para no crear una FK rígida
+                      hacia una tabla de usuarios (que puede
+                      vivir en otro servicio o microservicio).
+                      La validación de que el usuario exista
+                      es responsabilidad de la capa de negocio.
+
+    status
+        Tipo        : TEXT
+        Restricción : NOT NULL, DEFAULT 'ACTIVE',
+                      CHECK IN ('ACTIVE','CHECKED_OUT','ABANDONED')
+        Descripción : Estado del ciclo de vida del carrito.
+                      - ACTIVE      : en uso, acepta ítems
+                      - CHECKED_OUT : el usuario completó la compra
+                      - ABANDONED   : inactivo, no se retomará
+        Por qué     : El CHECK impide valores arbitrarios que
+                      rompan la lógica del sistema. El DEFAULT
+                      'ACTIVE' simplifica la creación.
+
+    created_at
+        Tipo        : TIMESTAMPTZ
+        Restricción : NOT NULL, DEFAULT now()
+        Descripción : Fecha y hora de creación del carrito.
+        Por qué     : TIMESTAMPTZ almacena la zona horaria,
+                      importante para sistemas con usuarios
+                      en distintos países.
+
+    updated_at
+        Tipo        : TIMESTAMPTZ
+        Restricción : NOT NULL, DEFAULT now()
+        Descripción : Fecha y hora de la última modificación.
+        Por qué     : Permite auditoría y detección de carritos
+                      abandonados por inactividad.
+
+
+----------------------------------------------------------------
+TABLA: cart_items
+----------------------------------------------------------------
+Propósito general:
+    Cada fila representa un producto dentro de un carrito.
+    El precio se "congela" al momento de agregar el ítem,
+    de modo que cambios posteriores en el catálogo no afecten
+    a pedidos en curso.
+
+Columnas:
+    id
+        Tipo        : UUID
+        Restricción : PRIMARY KEY, DEFAULT gen_random_uuid()
+        Descripción : Identificador único del ítem.
+        Por qué     : Igual que en carts, UUID evita colisiones
+                      y exposición de información de volumen.
+
+    cart_id
+        Tipo        : UUID
+        Restricción : NOT NULL, FOREIGN KEY → carts(id) ON DELETE CASCADE
+        Descripción : Referencia al carrito al que pertenece el ítem.
+        Por qué     : ON DELETE CASCADE significa que si se elimina
+                      el carrito padre, todos sus ítems se borran
+                      automáticamente, manteniendo consistencia
+                      sin requerir lógica extra en la aplicación.
+
+    product_id
+        Tipo        : TEXT
+        Restricción : NOT NULL
+        Descripción : ID del producto del catálogo externo.
+        Por qué     : Al igual que user_id, se usa TEXT para no
+                      acoplar el modelo a una tabla de productos
+                      concreta. La validación del producto la
+                      hace la capa de negocio o el servicio de catálogo.
+
+    quantity
+        Tipo        : INTEGER
+        Restricción : NOT NULL, CHECK (quantity >= 1)
+        Descripción : Cantidad de unidades del producto.
+        Por qué     : El CHECK impide que se guarden cantidades
+                      inválidas (0 o negativas). Una cantidad de
+                      0 equivale a "no está en el carrito" y debe
+                      representarse eliminando la fila.
+
+    unit_price
+        Tipo        : NUMERIC(10,2)
+        Restricción : NOT NULL, CHECK (unit_price >= 0)
+        Descripción : Precio unitario del producto en el momento
+                      en que fue agregado al carrito.
+        Por qué     : Se usa NUMERIC en lugar de FLOAT para evitar
+                      errores de redondeo en operaciones monetarias.
+                      El precio se congela aquí para que un cambio
+                      en el catálogo no altere el monto del pedido.
+
+    subtotal
+        Tipo        : NUMERIC(10,2)
+        Restricción : NOT NULL, CHECK (subtotal >= 0)
+        Descripción : Resultado de quantity * unit_price.
+        Por qué     : Se almacena precalculado para acelerar la
+                      lectura del total del carrito sin recalcular
+                      en cada consulta. La aplicación es responsable
+                      de mantenerlo sincronizado al actualizar
+                      quantity o unit_price.
+
+    UNIQUE (cart_id, product_id)
+        Descripción : Garantiza que un mismo producto no aparezca
+                      dos veces en el mismo carrito.
+        Por qué     : Si el usuario agrega un producto ya existente,
+                      la aplicación debe actualizar la fila existente
+                      (quantity += N), no insertar una nueva. Esta
+                      restricción lo refuerza a nivel de base de datos.
+
+
+----------------------------------------------------------------
+TABLA: checkout_attempts
+----------------------------------------------------------------
+Propósito general:
+    Registra cada intento de checkout (pago) asociado a un carrito.
+    La columna idempotency_key es el mecanismo principal para
+    prevenir cobros duplicados ante reintentos del cliente.
+
+Columnas:
+    id
+        Tipo        : UUID
+        Restricción : PRIMARY KEY, DEFAULT gen_random_uuid()
+        Descripción : Identificador único del intento de checkout.
+        Por qué     : UUID por las mismas razones que en las
+                      tablas anteriores.
+
+    cart_id
+        Tipo        : UUID
+        Restricción : NOT NULL, FOREIGN KEY → carts(id)
+        Descripción : Carrito sobre el que se intenta el checkout.
+        Por qué     : Un carrito puede tener múltiples intentos
+                      (por ejemplo, si el primer pago falla y el
+                      usuario reintenta). No se usa CASCADE aquí
+                      para conservar el historial de intentos
+                      aunque el carrito cambie de estado.
+
+    idempotency_key
+        Tipo        : UUID
+        Restricción : NOT NULL, UNIQUE
+        Descripción : Clave única que el cliente envía con cada
+                      solicitud de checkout.
+        Por qué     : Si el cliente reintenta la misma solicitud
+                      (doble clic, error de red, timeout), la base
+                      de datos rechaza la segunda inserción con un
+                      error de unicidad. La aplicación detecta ese
+                      error y devuelve el resultado del intento
+                      original en lugar de crear un cobro nuevo.
+                      Es la restricción más crítica del sistema
+                      para garantizar que un carrito se cobre
+                      una sola vez.
+
+    order_id
+        Tipo        : TEXT
+        Restricción : Nullable (sin NOT NULL)
+        Descripción : ID del pedido creado en el sistema de órdenes
+                      cuando el checkout fue exitoso.
+        Por qué     : Solo tiene valor cuando status = 'SUCCESS'.
+                      Si el intento está PENDING o FAILED, esta
+                      columna queda NULL porque todavía no existe
+                      (o no se creó) un pedido.
+
+    status
+        Tipo        : TEXT
+        Restricción : NOT NULL, DEFAULT 'PENDING',
+                      CHECK IN ('PENDING','SUCCESS','FAILED')
+        Descripción : Estado del intento de pago.
+                      - PENDING : se envió la solicitud, esperando respuesta
+                      - SUCCESS : el pago fue aprobado y se creó el pedido
+                      - FAILED  : el pago fue rechazado o hubo error
+        Por qué     : El CHECK evita estados inválidos. El DEFAULT
+                      'PENDING' refleja que un intento recién creado
+                      aún no tiene resultado.
+
+    created_at
+        Tipo        : TIMESTAMPTZ
+        Restricción : NOT NULL, DEFAULT now()
+        Descripción : Fecha y hora en que se inició el intento.
+        Por qué     : Permite auditoría y detección de intentos
+                      que quedaron en PENDING demasiado tiempo
+                      (posiblemente colgados).
+
+    updated_at
+        Tipo        : TIMESTAMPTZ
+        Restricción : NOT NULL, DEFAULT now()
+        Descripción : Fecha y hora de la última actualización del intento.
+        Por qué     : Indica cuándo cambió el status (por ejemplo,
+                      de PENDING a SUCCESS o FAILED).
+
+
+----------------------------------------------------------------
+ÍNDICES
+----------------------------------------------------------------
+
+carts_user_active_idx
+    Tabla   : carts
+    Tipo    : UNIQUE PARCIAL
+    Define  : UNIQUE (user_id) WHERE status = 'ACTIVE'
+    Propósito:
+        Garantiza que un usuario tenga como máximo 1 carrito
+        en estado ACTIVE al mismo tiempo. Esto aplica la regla
+        de negocio "un usuario, un carrito activo" directamente
+        en la base de datos, sin depender de validaciones en el
+        código de la aplicación.
+    Por qué es parcial:
+        Al aplicar la restricción solo a las filas WHERE
+        status = 'ACTIVE', los carritos históricos
+        (CHECKED_OUT o ABANDONED) del mismo usuario no
+        se ven afectados. Un usuario puede haber comprado
+        10 veces antes y aún así crear un nuevo carrito ACTIVE.
+
+cart_items_cart_idx
+    Tabla   : cart_items
+    Tipo    : Normal (no único)
+    Define  : ON (cart_id)
+    Propósito:
+        Acelera la consulta más frecuente sobre cart_items:
+        "dame todos los ítems del carrito X". Sin este índice,
+        PostgreSQL haría un escaneo completo de la tabla para
+        cada consulta de carrito.
+
+checkout_attempts_cart_idx
+    Tabla   : checkout_attempts
+    Tipo    : Normal (no único)
+    Define  : ON (cart_id)
+    Propósito:
+        Acelera la búsqueda de todos los intentos de checkout
+        de un carrito específico. Útil para mostrar el historial
+        de pagos o detectar intentos PENDING que no resolvieron.
+
+idempotency_key (restricción UNIQUE implícita)
+    Tabla   : checkout_attempts
+    Tipo    : Índice único (creado automáticamente por UNIQUE)
+    Define  : UNIQUE (idempotency_key)
+    Propósito:
+        Además de prevenir duplicados, PostgreSQL crea un índice
+        B-tree sobre esta columna automáticamente al definirla
+        como UNIQUE. Esto permite también buscar un intento
+        por su clave de idempotencia de forma eficiente,
+        lo que la aplicación necesita para devolver el resultado
+        del intento original ante un reintento.
+
+================================================================
+FIN DEL DOCUMENTO
+================================================================
