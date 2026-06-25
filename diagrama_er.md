@@ -42,14 +42,14 @@
 ├────────────────────┤   ├──────────────────────────────────────┤
 │ id        UUID [PK]│   │ id             UUID  [PK]            │
 │ cart_id   UUID [FK]│   │ cart_id        UUID  [FK] → carts.id │
-│           → carts  │   │ idempotency_key UUID [UQ]  ✨        │
-│           CASCADE  │   │                → Previene duplicados  │
-│ product_id TEXT    │   │ order_id       TEXT  (nullable)       │
+│           → carts  │   │ idempotency_key UUID [UQ]            │
+│           CASCADE  │   │                → Previene duplicados │
+│ product_id TEXT    │   │ order_id       TEXT  (nullable)      │
 │ quantity   INT [CK]│   │ status         TEXT  [CK]            │
-│            >= 1    │   │                DEFAULT 'PENDING'      │
+│            >= 1    │   │                DEFAULT 'PENDING'     │
 │ unit_price NUM [CK]│   │                IN (PENDING,          │
-│            >= 0    │   │                    SUCCESS,           │
-│ subtotal   NUM [CK]│   │                    FAILED)            │
+│            >= 0    │   │                    SUCCESS,          │
+│ subtotal   NUM [CK]│   │                    FAILED)           │
 │            >= 0    │   │ created_at     TIMESTAMPTZ           │
 ├────────────────────┤   │ updated_at     TIMESTAMPTZ           │
 │ [UQ] (cart_id,     │   ├──────────────────────────────────────┤

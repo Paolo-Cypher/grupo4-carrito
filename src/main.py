@@ -53,6 +53,9 @@ async def add_item(userId: str, data: AddItemRequest):
             "totalAmount": 0
         }
 
+    if carts[userId]["status"] == "CHECKED_OUT":
+        raise HTTPException(status_code=400, detail="El carrito ya fue procesado. No se pueden agregar productos.")
+
     new_item = {
         "productId": data.productId,
         "quantity": data.quantity,
