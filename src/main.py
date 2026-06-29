@@ -10,13 +10,11 @@ load_dotenv()
 app = FastAPI()
 
 # Inicializar Supabase
-supabase_url = os.getenv("SUPABASE_URL")
-supabase_key = os.getenv("SUPABASE_KEY")
-if not supabase_url or not supabase_key:
-    raise ValueError("SUPABASE_URL y SUPABASE_KEY son requeridos")
+database_url = os.getenv("DATABASE_URL")
+if not database_url:
+    raise ValueError("DATABASE_URL not found in environment variables")
 
-supabase: Client = create_client(supabase_url, supabase_key)
-
+supabase: Client = create_client(database_url, "")
 # ============================================
 # MODELOS PYDANTIC
 # ============================================
