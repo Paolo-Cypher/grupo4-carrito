@@ -3,11 +3,353 @@ const https = require("https");
 const { URL } = require("url");
 
 const express = require("express");
+const swaggerUi = require("swagger-ui-express");
 const { createClient } = require("@supabase/supabase-js");
 require("dotenv").config();
 
 const app = express();
 app.use(express.json());
+
+// ============================================
+// SWAGGER / OpenAPI — disponible en /docs
+// ============================================
+
+const swaggerSpec = {
+  openapi: "3.0.3",
+  info: {
+    title: "Grupo 4 - Carrito API",
+    version: "1.0.0",
+    description:
+      "Microservicio de carrito de compras (Node.js + Express + Supabase). " +
+      "Incluye gestión de items, validación de carrito CHECKED_OUT y checkout idempotente.",
+  },
+  servers: [{ url: "/", description: "Servidor actual" }],
+  tags: [
+    { name: "Cart", description: "Operaciones sobre el carrito" },
+    { name: "Checkout", description: "Proceso de checkout idempotente" },
+  ],
+  components: {
+    schemas: {
+      CartItem: {
+        type: "object",
+        properties: {
+          cart_id: { type: "string", example: "carrito-Juan" },
+          product_id: { type: "string", example: "P-100" },
+          quantity: { type: "integer", example: 2 },
+          unit_price: { type: "integer", example: 14990 },
+          subtotal: { type: "integer", example: 29980 },
+        },
+      },
+      Cart: {
+        type: "object",
+        properties: {
+          id: { type: "string", example: "carrito-Juan" },
+          userId: { type: "string", example: "Juan" },
+          status: {
+            type: "string",
+            enum: ["ACTIVE", "CHECKED_OUT"],
+            example: "ACTIVE",
+          },
+          items: {
+            type: "array",
+            items: { $ref: "#/components/schemas/CartItem" },
+          },
+          totalAmount: { type: "integer", example: 29980 },
+        },
+      },
+      AddItemRequest: {
+        type: "object",
+        required: ["productId"],
+        properties: {
+          productId: { type: "string", example: "P-100" },
+          quantity: { type: "integer", minimum: 1, default: 1, example: 1 },
+        },
+      },
+      CheckoutRequest: {
+        type: "object",
+        required: ["userId"],
+        properties: {
+          userId: { type: "string", example: "Juan" },
+        },
+      },
+      CheckoutResponse: {
+        type: "object",
+        properties: {
+          orderId: { type: "string", example: "ORD-1001" },
+          status: { type: "string", example: "CREATED" },
+          totalAmount: { type: "integer", example: 29980 },
+        },
+      },
+      Error: {
+        type: "object",
+        properties: {
+          detail: {
+            oneOf: [{ type: "string" }, { type: "object" }],
+            example: "Cart not found",
+          },
+        },
+      },
+      DuplicatedOrder: {
+        type: "object",
+        properties: {
+          detail: {
+            type: "object",
+            properties: {
+              message: { type: "string", example: "Intento duplicado" },
+              orderId: { type: "string", example: "ORD-1001" },
+              status: { type: "string", example: "DUPLICATED_ORDER" },
+            },
+          },
+        },
+      },
+    },
+  },
+  paths: {
+    "/cart/{userId}": {
+      get: {
+        tags: ["Cart"],
+        summary: "Ver carrito (lo crea si no existe)",
+        parameters: [
+          {
+            name: "userId",
+            in: "path",
+            required: true,
+            schema: { type: "string" },
+            example: "Juan",
+          },
+        ],
+        responses: {
+          200: {
+            description: "Carrito obtenido/creado",
+            content: {
+              "application/json": {
+                schema: { $ref: "#/components/schemas/Cart" },
+              },
+            },
+          },
+          400: {
+            description: "userId inválido",
+            content: {
+              "application/json": {
+                schema: { $ref: "#/components/schemas/Error" },
+              },
+            },
+          },
+          500: {
+            description: "Error interno",
+            content: {
+              "application/json": {
+                schema: { $ref: "#/components/schemas/Error" },
+              },
+            },
+          },
+        },
+      },
+    },
+    "/cart/{userId}/items": {
+      post: {
+        tags: ["Cart"],
+        summary: "Agregar producto al carrito",
+        parameters: [
+          {
+            name: "userId",
+            in: "path",
+            required: true,
+            schema: { type: "string" },
+            example: "Juan",
+          },
+        ],
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: { $ref: "#/components/schemas/AddItemRequest" },
+              example: { productId: "P-100", quantity: 1 },
+            },
+          },
+        },
+        responses: {
+          200: {
+            description: "Item agregado, carrito actualizado",
+            content: {
+              "application/json": {
+                schema: { $ref: "#/components/schemas/Cart" },
+              },
+            },
+          },
+          400: {
+            description:
+              "Datos inválidos o carrito CHECKED_OUT (no se pueden agregar productos)",
+            content: {
+              "application/json": {
+                schema: { $ref: "#/components/schemas/Error" },
+                example: {
+                  detail:
+                    "El carrito ya fue procesado. No se pueden agregar productos.",
+                },
+              },
+            },
+          },
+          404: {
+            description: "Carrito no encontrado",
+            content: {
+              "application/json": {
+                schema: { $ref: "#/components/schemas/Error" },
+                example: { detail: "Cart not found" },
+              },
+            },
+          },
+          500: {
+            description: "Error interno",
+            content: {
+              "application/json": {
+                schema: { $ref: "#/components/schemas/Error" },
+              },
+            },
+          },
+        },
+      },
+    },
+    "/cart/{userId}/items/{productId}": {
+      delete: {
+        tags: ["Cart"],
+        summary: "Eliminar producto del carrito",
+        parameters: [
+          {
+            name: "userId",
+            in: "path",
+            required: true,
+            schema: { type: "string" },
+            example: "Juan",
+          },
+          {
+            name: "productId",
+            in: "path",
+            required: true,
+            schema: { type: "string" },
+            example: "P-100",
+          },
+        ],
+        responses: {
+          204: { description: "Item eliminado (sin body)" },
+          400: {
+            description: "Carrito CHECKED_OUT (no se pueden eliminar productos)",
+            content: {
+              "application/json": {
+                schema: { $ref: "#/components/schemas/Error" },
+                example: {
+                  detail:
+                    "El carrito ya fue procesado. No se pueden eliminar productos.",
+                },
+              },
+            },
+          },
+          404: {
+            description: "Carrito o item no encontrado",
+            content: {
+              "application/json": {
+                schema: { $ref: "#/components/schemas/Error" },
+                example: { detail: "Item not found" },
+              },
+            },
+          },
+          500: {
+            description: "Error interno",
+            content: {
+              "application/json": {
+                schema: { $ref: "#/components/schemas/Error" },
+              },
+            },
+          },
+        },
+      },
+    },
+    "/checkout": {
+      post: {
+        tags: ["Checkout"],
+        summary: "Procesar checkout (idempotente)",
+        parameters: [
+          {
+            name: "Idempotency-Key",
+            in: "header",
+            required: true,
+            description: "Clave de idempotencia para evitar órdenes duplicadas",
+            schema: { type: "string" },
+            example: "550e8400-e29b-41d4-a716-446655440000",
+          },
+        ],
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: { $ref: "#/components/schemas/CheckoutRequest" },
+              example: { userId: "Juan" },
+            },
+          },
+        },
+        responses: {
+          201: {
+            description: "Orden creada",
+            content: {
+              "application/json": {
+                schema: { $ref: "#/components/schemas/CheckoutResponse" },
+                example: {
+                  orderId: "ORD-1001",
+                  status: "CREATED",
+                  totalAmount: 29980,
+                },
+              },
+            },
+          },
+          400: {
+            description:
+              "Falta userId/Idempotency-Key o carrito vacío",
+            content: {
+              "application/json": {
+                schema: { $ref: "#/components/schemas/Error" },
+                example: { detail: "Carrito vacío" },
+              },
+            },
+          },
+          404: {
+            description: "Carrito no encontrado",
+            content: {
+              "application/json": {
+                schema: { $ref: "#/components/schemas/Error" },
+                example: { detail: "Cart not found" },
+              },
+            },
+          },
+          409: {
+            description: "Intento duplicado (Idempotency-Key ya usada)",
+            content: {
+              "application/json": {
+                schema: { $ref: "#/components/schemas/DuplicatedOrder" },
+                example: {
+                  detail: {
+                    message: "Intento duplicado",
+                    orderId: "ORD-1001",
+                    status: "DUPLICATED_ORDER",
+                  },
+                },
+              },
+            },
+          },
+          500: {
+            description: "Error interno o fallo con G5",
+            content: {
+              "application/json": {
+                schema: { $ref: "#/components/schemas/Error" },
+              },
+            },
+          },
+        },
+      },
+    },
+  },
+};
+
+app.use("/docs", swaggerUi.serve, swaggerUi.setup(swaggerSpec));
 
 // ============================================
 // INICIALIZAR SUPABASE
@@ -64,7 +406,7 @@ function normalizeUserId(userId) {
   return normalized;
 }
 
-function buildG5OrderPayload(userId, cartId, items, totalAmount, idempotencyKey) {
+function buildG5OrderPayload(userId, cartId, items, totalAmount) {
   return {
     userId: userId,
     cartId: cartId,
@@ -75,11 +417,10 @@ function buildG5OrderPayload(userId, cartId, items, totalAmount, idempotencyKey)
       subtotal: item.subtotal,
     })),
     totalAmount: totalAmount,
-    idempotencyKey: idempotencyKey,
   };
 }
 
-function createOrderInG5(payload) {
+function createOrderInG5(payload, idempotencyKey) {
   return new Promise((resolve, reject) => {
     if (!g5OrdersUrl) {
       reject(new HttpException(500, "G5_ORDERS_URL no configurada"));
@@ -101,6 +442,7 @@ function createOrderInG5(payload) {
       headers: {
         "Content-Type": "application/json",
         "Content-Length": body.length,
+        "Idempotency-Key": idempotencyKey,
       },
       timeout: 10000,
     };
@@ -264,21 +606,39 @@ app.post("/cart/:userId/items", async (req, res) => {
       );
     }
 
-    // Insertar o actualizar item
-    const subtotal = data.quantity * 14990;
+    // Verificar si el producto ya existe en el carrito
+    const existingItem = await run(
+      supabase
+        .from("cart_items")
+        .select("*")
+        .eq("cart_id", cartId)
+        .eq("product_id", data.productId)
+    );
 
-    await run(
-      supabase.from("cart_items").upsert(
-        {
+    if (existingItem && existingItem.length > 0) {
+      // Producto existe → sumar cantidad
+      const newQuantity = existingItem[0].quantity + data.quantity;
+      const newSubtotal = newQuantity * 14990;
+      await run(
+        supabase
+          .from("cart_items")
+          .update({ quantity: newQuantity, subtotal: newSubtotal })
+          .eq("cart_id", cartId)
+          .eq("product_id", data.productId)
+      );
+    } else {
+      // Producto no existe → insertar
+      const subtotal = data.quantity * 14990;
+      await run(
+        supabase.from("cart_items").insert({
           cart_id: cartId,
           product_id: data.productId,
           quantity: data.quantity,
           unit_price: 14990,
           subtotal: subtotal,
-        },
-        { onConflict: "cart_id,product_id" }
-      )
-    );
+        })
+      );
+    }
 
     // Obtener carrito actualizado
     const items = await run(
@@ -428,14 +788,8 @@ app.post("/checkout", async (req, res) => {
       supabase.from("carts").update({ status: "CHECKED_OUT" }).eq("id", cartId)
     );
 
-    const g5Payload = buildG5OrderPayload(
-      userId,
-      cartId,
-      items,
-      totalAmount,
-      idempotencyKey
-    );
-    const g5Response = await createOrderInG5(g5Payload);
+    const g5Payload = buildG5OrderPayload(userId, cartId, items, totalAmount);
+    const g5Response = await createOrderInG5(g5Payload, idempotencyKey);
     const orderId = g5Response.orderId || g5Response.order_id;
 
     if (!orderId) {
