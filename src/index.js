@@ -447,6 +447,11 @@ function createOrderInG5(payload, idempotencyKey) {
       timeout: 10000,
     };
 
+    console.log("=== G5 REQUEST ===");
+    console.log("URL:", parsedUrl.href);
+    console.log("Headers:", options.headers);
+    console.log("Body:", payload);
+
     const request = transport.request(parsedUrl, options, (response) => {
       let responseText = "";
       response.setEncoding("utf-8");
@@ -455,6 +460,10 @@ function createOrderInG5(payload, idempotencyKey) {
       });
       response.on("end", () => {
         const statusCode = response.statusCode || 0;
+        console.log("=== G5 RESPONSE ===");
+        console.log("Status:", statusCode);
+        console.log("Response Text:", responseText);
+        console.log("=== FIN G5 ===");
         if (statusCode >= 400) {
           reject(
             new HttpException(
@@ -467,6 +476,7 @@ function createOrderInG5(payload, idempotencyKey) {
         try {
           resolve(responseText ? JSON.parse(responseText) : {});
         } catch (err) {
+          console.log("JSON.parse error:", err.message);
           resolve({});
         }
       });
@@ -790,7 +800,7 @@ app.post("/checkout", async (req, res) => {
 
     const g5Payload = buildG5OrderPayload(userId, cartId, items, totalAmount);
     const g5Response = await createOrderInG5(g5Payload, idempotencyKey);
-    const orderId = g5Response.orderId || g5Response.order_id;
+    const orderId = g5Response.orderNumber || g5Response.orderId || g5Response.order_id;
 
     if (!orderId) {
       await run(
