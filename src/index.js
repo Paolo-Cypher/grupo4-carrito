@@ -886,7 +886,7 @@ app.post("/checkout", async (req, res) => {
 
 function handleError(req, res, e) {
   const correlationId = req.correlationId;
-  console.error(`[ERROR] correlationId=${correlationId} | ${e.message}`);
+  console.error("TRACING_ERROR | correlationId=" + correlationId + " | " + e.message);
 
   if (e instanceof ValidationException) {
     const message = e.errors.map((err) => err.msg).join("; ");
