@@ -20,6 +20,9 @@ app.use((req, res, next) => {
   req.correlationId = req.headers["x-correlation-id"] || randomUUID();
   res.setHeader("x-request-id", req.requestId);
   res.setHeader("x-correlation-id", req.correlationId);
+  console.log(
+    `[${req.method}] ${req.path} | requestId=${req.requestId} | correlationId=${req.correlationId}`
+  );
   next();
 });
 
@@ -491,6 +494,7 @@ function createOrderInG5(payload, idempotencyKey, requestId, correlationId) {
       });
       response.on("end", () => {
         const statusCode = response.statusCode || 0;
+        console.log(`[G5] correlationId=${correlationId} | status=${statusCode}`);
         if (statusCode >= 400) {
           reject(
             new HttpException(
@@ -882,6 +886,7 @@ app.post("/checkout", async (req, res) => {
 
 function handleError(req, res, e) {
   const correlationId = req.correlationId;
+  console.error(`[ERROR] correlationId=${correlationId} | ${e.message}`);
 
   if (e instanceof ValidationException) {
     const message = e.errors.map((err) => err.msg).join("; ");
