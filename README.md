@@ -1,3 +1,5 @@
+![CI](https://github.com/Paolo-Cypher/grupo4-carrito/actions/workflows/ci.yml/badge.svg)
+
 # grupo4-carrito
 
 Servicio de Carrito y Checkout - E3 Cloud

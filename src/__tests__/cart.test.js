@@ -58,7 +58,8 @@ describe("GET /cart/:userId", () => {
     const res = await request(app).get("/cart/%20");
 
     expect(res.status).toBe(400);
-    expect(res.body.detail).toBe("userId es requerido");
+    expect(res.body.code).toBe("INVALID_REQUEST");
+    expect(res.body.message).toBe("userId es requerido");
   });
 });
 
@@ -170,6 +171,6 @@ describe("POST /checkout", () => {
       .send({ userId: CHECKOUT_USER });
 
     expect(res.status).toBe(409);
-    expect(res.body.detail.status).toBe("DUPLICATED_ORDER");
+    expect(res.body.code).toBe("DUPLICATED_ORDER");
   });
 });

@@ -1,6 +1,7 @@
 const http = require("http");
 const https = require("https");
 const { URL } = require("url");
+const { randomUUID } = require("crypto");
 
 const express = require("express");
 const swaggerUi = require("swagger-ui-express");
@@ -9,6 +10,21 @@ require("dotenv").config();
 
 const app = express();
 app.use(express.json());
+
+// ============================================
+// TRAZABILIDAD — X-Request-Id / X-Correlation-Id
+// ============================================
+
+app.use((req, res, next) => {
+  req.requestId = req.headers["x-request-id"] || randomUUID();
+  req.correlationId = req.headers["x-correlation-id"] || randomUUID();
+  res.setHeader("x-request-id", req.requestId);
+  res.setHeader("x-correlation-id", req.correlationId);
+  console.log(
+    `[${req.method}] ${req.path} | requestId=${req.requestId} | correlationId=${req.correlationId}`
+  );
+  next();
+});
 
 // ============================================
 // SWAGGER / OpenAPI — disponible en /docs
@@ -380,10 +396,10 @@ async function run(query) {
 // ============================================
 
 class HttpException extends Error {
-  constructor(statusCode, detail) {
-    super(typeof detail === "string" ? detail : "HTTPException");
+  constructor(statusCode, code, message) {
+    super(message);
     this.statusCode = statusCode;
-    this.detail = detail;
+    this.code = code;
   }
 }
 
@@ -395,13 +411,27 @@ class ValidationException extends Error {
 }
 
 // ============================================
+// RESPUESTA DE ERROR ESTANDARIZADA (contrato G4)
+// ============================================
+
+function errorResponse(res, status, code, message, correlationId) {
+  return res.status(status).json({
+    timestamp: new Date().toISOString(),
+    status,
+    code,
+    message,
+    correlationId,
+  });
+}
+
+// ============================================
 // HELPERS
 // ============================================
 
 function normalizeUserId(userId) {
   const normalized = userId ? userId.trim() : "";
   if (!normalized) {
-    throw new HttpException(400, "userId es requerido");
+    throw new HttpException(400, "INVALID_REQUEST", "userId es requerido");
   }
   return normalized;
 }
@@ -420,10 +450,10 @@ function buildG5OrderPayload(userId, cartId, items, totalAmount) {
   };
 }
 
-function createOrderInG5(payload, idempotencyKey) {
+function createOrderInG5(payload, idempotencyKey, requestId, correlationId) {
   return new Promise((resolve, reject) => {
     if (!g5OrdersUrl) {
-      reject(new HttpException(500, "G5_ORDERS_URL no configurada"));
+      reject(new HttpException(500, "INTERNAL_SERVER_ERROR", "G5_ORDERS_URL no configurada"));
       return;
     }
 
@@ -432,7 +462,13 @@ function createOrderInG5(payload, idempotencyKey) {
     try {
       parsedUrl = new URL(g5OrdersUrl);
     } catch (err) {
-      reject(new HttpException(500, `No se pudo conectar con G5: ${err.message}`));
+      reject(
+        new HttpException(
+          500,
+          "INTERNAL_SERVER_ERROR",
+          `No se pudo conectar con G5: ${err.message}`
+        )
+      );
       return;
     }
 
@@ -443,6 +479,9 @@ function createOrderInG5(payload, idempotencyKey) {
         "Content-Type": "application/json",
         "Content-Length": body.length,
         "Idempotency-Key": idempotencyKey,
+        "X-Request-Id": requestId,
+        "X-Correlation-Id": correlationId,
+        "X-Consumer": "grupo-4",
       },
       timeout: 10000,
     };
@@ -455,10 +494,12 @@ function createOrderInG5(payload, idempotencyKey) {
       });
       response.on("end", () => {
         const statusCode = response.statusCode || 0;
+        console.log(`[G5] correlationId=${correlationId} | status=${statusCode}`);
         if (statusCode >= 400) {
           reject(
             new HttpException(
               500,
+              "INTERNAL_SERVER_ERROR",
               `G5 respondió ${statusCode}: ${responseText || response.statusMessage}`
             )
           );
@@ -474,11 +515,19 @@ function createOrderInG5(payload, idempotencyKey) {
 
     request.on("timeout", () => {
       request.destroy();
-      reject(new HttpException(500, "No se pudo conectar con G5: timeout"));
+      reject(
+        new HttpException(500, "INTERNAL_SERVER_ERROR", "No se pudo conectar con G5: timeout")
+      );
     });
 
     request.on("error", (err) => {
-      reject(new HttpException(500, `No se pudo conectar con G5: ${err.message}`));
+      reject(
+        new HttpException(
+          500,
+          "INTERNAL_SERVER_ERROR",
+          `No se pudo conectar con G5: ${err.message}`
+        )
+      );
     });
 
     request.write(body);
@@ -569,7 +618,7 @@ app.get("/cart/:userId", async (req, res) => {
       totalAmount: totalAmount,
     });
   } catch (e) {
-    return handleError(res, e);
+    return handleError(req, res, e);
   }
 });
 
@@ -592,7 +641,7 @@ app.post("/cart/:userId/items", async (req, res) => {
     );
 
     if (!cartData || cartData.length === 0) {
-      throw new HttpException(404, "Cart not found");
+      throw new HttpException(404, "NOT_FOUND", "Cart not found");
     }
 
     const cart = cartData[0];
@@ -602,6 +651,7 @@ app.post("/cart/:userId/items", async (req, res) => {
     if (cart.status === "CHECKED_OUT") {
       throw new HttpException(
         400,
+        "CART_ALREADY_CHECKED_OUT",
         "El carrito ya fue procesado. No se pueden agregar productos."
       );
     }
@@ -654,7 +704,7 @@ app.post("/cart/:userId/items", async (req, res) => {
       totalAmount: totalAmount,
     });
   } catch (e) {
-    return handleError(res, e);
+    return handleError(req, res, e);
   }
 });
 
@@ -677,7 +727,7 @@ app.delete("/cart/:userId/items/:productId", async (req, res) => {
     );
 
     if (!cartData || cartData.length === 0) {
-      throw new HttpException(404, "Cart not found");
+      throw new HttpException(404, "NOT_FOUND", "Cart not found");
     }
 
     const cart = cartData[0];
@@ -691,13 +741,14 @@ app.delete("/cart/:userId/items/:productId", async (req, res) => {
         .eq("product_id", productId)
     );
     if (!itemData || itemData.length === 0) {
-      throw new HttpException(404, "Item not found");
+      throw new HttpException(404, "NOT_FOUND", "Item not found");
     }
 
     // Validar que el carrito no esté CHECKED_OUT
     if (cart.status === "CHECKED_OUT") {
       throw new HttpException(
         400,
+        "CART_ALREADY_CHECKED_OUT",
         "El carrito ya fue procesado. No se pueden eliminar productos."
       );
     }
@@ -713,7 +764,7 @@ app.delete("/cart/:userId/items/:productId", async (req, res) => {
 
     return res.status(204).send();
   } catch (e) {
-    return handleError(res, e);
+    return handleError(req, res, e);
   }
 });
 
@@ -728,7 +779,7 @@ app.post("/checkout", async (req, res) => {
     const idempotencyKey = req.get("Idempotency-Key");
 
     if (!userId || !idempotencyKey) {
-      throw new HttpException(400, "userId y Idempotency-Key requeridos");
+      throw new HttpException(400, "INVALID_REQUEST", "userId y Idempotency-Key requeridos");
     }
 
     // Verificar si ya existe este intento de checkout (idempotencia)
@@ -741,11 +792,11 @@ app.post("/checkout", async (req, res) => {
 
     if (existing && existing.length > 0) {
       const currentAttempt = existing[0];
-      throw new HttpException(409, {
-        message: "Intento duplicado",
-        orderId: currentAttempt.order_id ?? null,
-        status: "DUPLICATED_ORDER",
-      });
+      throw new HttpException(
+        409,
+        "DUPLICATED_ORDER",
+        `Intento duplicado, orderId existente: ${currentAttempt.order_id ?? "N/A"}`
+      );
     }
 
     // Obtener carrito
@@ -758,7 +809,7 @@ app.post("/checkout", async (req, res) => {
     );
 
     if (!cartData || cartData.length === 0) {
-      throw new HttpException(404, "Cart not found");
+      throw new HttpException(404, "NOT_FOUND", "Cart not found");
     }
 
     const cart = cartData[0];
@@ -769,7 +820,7 @@ app.post("/checkout", async (req, res) => {
       supabase.from("cart_items").select("*").eq("cart_id", cartId)
     );
     if (!items || items.length === 0) {
-      throw new HttpException(400, "Carrito vacío");
+      throw new HttpException(400, "EMPTY_CART", "Carrito vacío");
     }
 
     const totalAmount = items.reduce((acc, item) => acc + item.subtotal, 0);
@@ -789,7 +840,12 @@ app.post("/checkout", async (req, res) => {
     );
 
     const g5Payload = buildG5OrderPayload(userId, cartId, items, totalAmount);
-    const g5Response = await createOrderInG5(g5Payload, idempotencyKey);
+    const g5Response = await createOrderInG5(
+      g5Payload,
+      idempotencyKey,
+      req.requestId,
+      req.correlationId
+    );
     const orderId = g5Response.orderNumber || g5Response.orderId || g5Response.order_id;
 
     if (!orderId) {
@@ -803,7 +859,7 @@ app.post("/checkout", async (req, res) => {
           .eq("cart_id", cartId)
           .eq("idempotency_key", idempotencyKey)
       );
-      throw new HttpException(500, "G5 no devolvió orderId");
+      throw new HttpException(500, "INTERNAL_SERVER_ERROR", "G5 no devolvió orderId");
     }
 
     await run(
@@ -820,7 +876,7 @@ app.post("/checkout", async (req, res) => {
       totalAmount: totalAmount,
     });
   } catch (e) {
-    return handleError(res, e);
+    return handleError(req, res, e);
   }
 });
 
@@ -828,17 +884,25 @@ app.post("/checkout", async (req, res) => {
 // MANEJO DE ERRORES CENTRALIZADO
 // ============================================
 
-function handleError(res, e) {
+function handleError(req, res, e) {
+  const correlationId = req.correlationId;
+  console.error(`[ERROR] correlationId=${correlationId} | ${e.message}`);
+
   if (e instanceof ValidationException) {
-    return res
-      .status(400)
-      .json({ detail: "Solicitud inválida", errors: e.errors });
+    const message = e.errors.map((err) => err.msg).join("; ");
+    return errorResponse(res, 400, "INVALID_REQUEST", message, correlationId);
   }
   if (e instanceof HttpException) {
-    return res.status(e.statusCode).json({ detail: e.detail });
+    return errorResponse(res, e.statusCode, e.code, e.message, correlationId);
   }
   // Cualquier otro error → 500
-  return res.status(500).json({ detail: `Error: ${e.message}` });
+  return errorResponse(
+    res,
+    500,
+    "INTERNAL_SERVER_ERROR",
+    `Error: ${e.message}`,
+    correlationId
+  );
 }
 
 // ============================================
