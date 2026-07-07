@@ -3,6 +3,10 @@ const request = require("supertest");
 const { createClient } = require("@supabase/supabase-js");
 require("dotenv").config();
 
+// El test de timeout de G2 necesita un timeout corto: se fuerza aquí (después
+// de dotenv.config()) para no depender de si .env define REQUEST_TIMEOUT.
+process.env.REQUEST_TIMEOUT = "200";
+
 const app = require("../index");
 const realFetch = global.fetch.bind(global);
 
@@ -22,38 +26,123 @@ const g3Products = {
   "P-999": 9000,
 };
 
+function extractBearerToken(options) {
+  const headers = (options && options.headers) || {};
+  const authHeader = headers.Authorization || headers.authorization || "";
+  return authHeader.startsWith("Bearer ") ? authHeader.slice(7) : null;
+}
+
+function g2ValidResponseFor(token) {
+  return {
+    ok: true,
+    status: 200,
+    json: async () => ({
+      valid: true,
+      user_id: token,
+      business_user_id: token,
+      email: `${token}@test.local`,
+      role: "customer",
+      status: "active",
+    }),
+  };
+}
+
 function mockG3ProductFetch(productId, price) {
-  return jest.spyOn(global, "fetch").mockImplementation(async (url, ...args) => {
-    if (String(url).includes(`/products/${encodeURIComponent(productId)}`)) {
+  return jest.spyOn(global, "fetch").mockImplementation(async (url, options) => {
+    const strUrl = String(url);
+    if (strUrl.includes("/auth/validate")) {
+      return g2ValidResponseFor(extractBearerToken(options));
+    }
+    if (strUrl.includes(`/products/${encodeURIComponent(productId)}`)) {
       return {
         ok: true,
         status: 200,
         json: async () => ({ id: productId, price }),
       };
     }
-    return realFetch(url, ...args);
+    return realFetch(url, options);
   });
 }
 
 function mockG3NotFoundFetch() {
-  return jest.spyOn(global, "fetch").mockImplementation(async (url, ...args) => {
-    if (String(url).includes("/products/")) {
+  return jest.spyOn(global, "fetch").mockImplementation(async (url, options) => {
+    const strUrl = String(url);
+    if (strUrl.includes("/auth/validate")) {
+      return g2ValidResponseFor(extractBearerToken(options));
+    }
+    if (strUrl.includes("/products/")) {
       return {
         ok: false,
         status: 404,
         json: async () => ({ detail: "Producto no encontrado" }),
       };
     }
-    return realFetch(url, ...args);
+    return realFetch(url, options);
   });
 }
 
 function mockG3UnavailableFetch() {
-  return jest.spyOn(global, "fetch").mockImplementation(async (url, ...args) => {
-    if (String(url).includes("/products/")) {
+  return jest.spyOn(global, "fetch").mockImplementation(async (url, options) => {
+    const strUrl = String(url);
+    if (strUrl.includes("/auth/validate")) {
+      return g2ValidResponseFor(extractBearerToken(options));
+    }
+    if (strUrl.includes("/products/")) {
       throw new Error("connect ECONNREFUSED");
     }
-    return realFetch(url, ...args);
+    return realFetch(url, options);
+  });
+}
+
+function mockG2Valid() {
+  return jest.spyOn(global, "fetch").mockImplementation(async (url, options) => {
+    if (String(url).includes("/auth/validate")) {
+      return g2ValidResponseFor(extractBearerToken(options));
+    }
+    return realFetch(url, options);
+  });
+}
+
+function mockG2Invalid() {
+  return jest.spyOn(global, "fetch").mockImplementation(async (url, options) => {
+    if (String(url).includes("/auth/validate")) {
+      return {
+        ok: false,
+        status: 401,
+        json: async () => ({ valid: false }),
+      };
+    }
+    return realFetch(url, options);
+  });
+}
+
+function mockG2Error500() {
+  return jest.spyOn(global, "fetch").mockImplementation(async (url, options) => {
+    if (String(url).includes("/auth/validate")) {
+      return {
+        ok: false,
+        status: 500,
+        json: async () => ({ error: "internal" }),
+      };
+    }
+    return realFetch(url, options);
+  });
+}
+
+function mockG2Timeout() {
+  return jest.spyOn(global, "fetch").mockImplementation((url, options = {}) => {
+    if (!String(url).includes("/auth/validate")) {
+      return realFetch(url, options);
+    }
+    return new Promise((_, reject) => {
+      if (options.signal) {
+        options.signal.addEventListener("abort", () => {
+          const err = new Error("The operation was aborted");
+          err.name = "AbortError";
+          reject(err);
+        });
+      }
+    });
   });
 }
 
@@ -74,8 +163,12 @@ async function cleanupUser(userId) {
 }
 
 beforeAll(async () => {
+  const spy = mockG2Valid();
   // GET crea el carrito automáticamente si no existe
-  await request(app).get(`/cart/${TEST_USER}`);
+  await request(app)
+    .get(`/cart/${TEST_USER}`)
+    .set("Authorization", `Bearer ${TEST_USER}`);
+  spy.mockRestore();
 });
 
 afterAll(async () => {
@@ -85,8 +178,16 @@ afterAll(async () => {
 });
 
 describe("GET /cart/:userId", () => {
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
   test("retorna 200 y crea carrito si no existe", async () => {
-    const res = await request(app).get(`/cart/${NEW_USER}`);
+    mockG2Valid();
+
+    const res = await request(app)
+      .get(`/cart/${NEW_USER}`)
+      .set("Authorization", `Bearer ${NEW_USER}`);
 
     expect(res.status).toBe(200);
     expect(res.body).toHaveProperty("id");
@@ -97,8 +198,12 @@ describe("GET /cart/:userId", () => {
   });
 
   test("retorna 400 si userId está vacío", async () => {
+    mockG2Valid();
+
     // %20 decodifica a un espacio; normalizeUserId lo recorta y queda vacío
-    const res = await request(app).get("/cart/%20");
+    const res = await request(app)
+      .get("/cart/%20")
+      .set("Authorization", "Bearer any-token");
 
     expect(res.status).toBe(400);
     expect(res.body.code).toBe("INVALID_REQUEST");
@@ -116,6 +221,7 @@ describe("POST /cart/:userId/items", () => {
 
     const res = await request(app)
       .post(`/cart/${TEST_USER}/items`)
+      .set("Authorization", `Bearer ${TEST_USER}`)
       .send({ productId: "P-100", quantity: 1 });
 
     expect(res.status).toBe(200);
@@ -131,6 +237,7 @@ describe("POST /cart/:userId/items", () => {
 
     const res = await request(app)
       .post(`/cart/${TEST_USER}/items`)
+      .set("Authorization", `Bearer ${TEST_USER}`)
       .send({ quantity: 1 });
 
     expect(res.status).toBe(400);
@@ -141,6 +248,7 @@ describe("POST /cart/:userId/items", () => {
 
     const res = await request(app)
       .post(`/cart/${TEST_USER}/items`)
+      .set("Authorization", `Bearer ${TEST_USER}`)
       .send({ productId: "P-100", quantity: 0 });
 
     expect(res.status).toBe(400);
@@ -151,6 +259,7 @@ describe("POST /cart/:userId/items", () => {
 
     const res = await request(app)
       .post(`/cart/${TEST_USER}/items`)
+      .set("Authorization", `Bearer ${TEST_USER}`)
       .send({ productId: "P-100", quantity: -1 });
 
     expect(res.status).toBe(400);
@@ -161,10 +270,12 @@ describe("POST /cart/:userId/items", () => {
 
     await request(app)
       .post(`/cart/${TEST_USER}/items`)
+      .set("Authorization", `Bearer ${TEST_USER}`)
       .send({ productId: "P-200", quantity: 2 });
 
     const res = await request(app)
       .post(`/cart/${TEST_USER}/items`)
+      .set("Authorization", `Bearer ${TEST_USER}`)
       .send({ productId: "P-200", quantity: 3 });
 
     expect(res.status).toBe(200);
@@ -180,6 +291,7 @@ describe("POST /cart/:userId/items", () => {
 
     const res = await request(app)
       .post(`/cart/${TEST_USER}/items`)
+      .set("Authorization", `Bearer ${TEST_USER}`)
       .send({ productId: "NO-EXISTE", quantity: 1 });
 
     expect(res.status).toBe(404);
@@ -191,6 +303,7 @@ describe("POST /cart/:userId/items", () => {
 
     const res = await request(app)
       .post(`/cart/${TEST_USER}/items`)
+      .set("Authorization", `Bearer ${TEST_USER}`)
       .send({ productId: "G3-HANG", quantity: 1 });
 
     expect(res.status).toBe(503);
@@ -199,32 +312,48 @@ describe("POST /cart/:userId/items", () => {
 });
 
 describe("DELETE /cart/:userId/items/:productId", () => {
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
   test("retorna 204 al eliminar item existente", async () => {
     // Asegura el item para este test, independiente de otros describes
     mockG3ProductFetch("P-999", g3Products["P-999"]);
 
     await request(app)
       .post(`/cart/${TEST_USER}/items`)
+      .set("Authorization", `Bearer ${TEST_USER}`)
       .send({ productId: "P-999", quantity: 1 });
 
-    const res = await request(app).delete(`/cart/${TEST_USER}/items/P-999`);
+    const res = await request(app)
+      .delete(`/cart/${TEST_USER}/items/P-999`)
+      .set("Authorization", `Bearer ${TEST_USER}`);
 
     expect(res.status).toBe(204);
   });
 
   test("retorna 404 si el item no existe", async () => {
-    const res = await request(app).delete(
-      `/cart/${TEST_USER}/items/NO-EXISTE`
-    );
+    mockG2Valid();
+
+    const res = await request(app)
+      .delete(`/cart/${TEST_USER}/items/NO-EXISTE`)
+      .set("Authorization", `Bearer ${TEST_USER}`);
 
     expect(res.status).toBe(404);
   });
 });
 
 describe("POST /checkout", () => {
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
   test("retorna 400 si userId está vacío en body", async () => {
+    mockG2Valid();
+
     const res = await request(app)
       .post("/checkout")
+      .set("Authorization", "Bearer any-token")
       .set("Idempotency-Key", randomUUID())
       .send({ userId: "" });
 
@@ -235,9 +364,12 @@ describe("POST /checkout", () => {
     // Carrito propio para este test, con un item, independiente de otros describes
     mockG3ProductFetch("P-100", g3Products["P-100"]);
 
-    await request(app).get(`/cart/${CHECKOUT_USER}`);
+    await request(app)
+      .get(`/cart/${CHECKOUT_USER}`)
+      .set("Authorization", `Bearer ${CHECKOUT_USER}`);
     await request(app)
       .post(`/cart/${CHECKOUT_USER}/items`)
+      .set("Authorization", `Bearer ${CHECKOUT_USER}`)
       .send({ productId: "P-100", quantity: 1 });
 
     const idempotencyKey = randomUUID();
@@ -247,6 +379,7 @@ describe("POST /checkout", () => {
     // registrado el intento con esta Idempotency-Key.
     await request(app)
       .post("/checkout")
+      .set("Authorization", `Bearer ${CHECKOUT_USER}`)
       .set("Idempotency-Key", idempotencyKey)
       .send({ userId: CHECKOUT_USER });
 
@@ -254,10 +387,130 @@ describe("POST /checkout", () => {
     // importar el resultado del primero.
     const res = await request(app)
       .post("/checkout")
+      .set("Authorization", `Bearer ${CHECKOUT_USER}`)
       .set("Idempotency-Key", idempotencyKey)
       .send({ userId: CHECKOUT_USER });
 
     expect(res.status).toBe(409);
     expect(res.body.code).toBe("DUPLICATED_ORDER");
+  });
+});
+
+describe("Authentication (G2 Integration)", () => {
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
+  test("GET /cart sin token → 401 (Missing Auth Header)", async () => {
+    const res = await request(app).get(`/cart/${TEST_USER}`);
+
+    expect(res.status).toBe(401);
+    expect(res.body.code).toBe("UNAUTHORIZED");
+    expect(res.body.message).toBe("Token requerido");
+  });
+
+  test("GET /cart con token válido → 200 (devuelve carrito)", async () => {
+    mockG2Valid();
+
+    const res = await request(app)
+      .get(`/cart/${TEST_USER}`)
+      .set("Authorization", `Bearer ${TEST_USER}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.userId).toBe(TEST_USER);
+  });
+
+  test("GET /cart con token inválido → 401 (Unauthorized)", async () => {
+    mockG2Invalid();
+
+    const res = await request(app)
+      .get(`/cart/${TEST_USER}`)
+      .set("Authorization", "Bearer bad-token");
+
+    expect(res.status).toBe(401);
+    expect(res.body.code).toBe("UNAUTHORIZED");
+    expect(res.body.message).toBe("Token inválido o expirado");
+  });
+
+  test("GET /cart/:otherUser con token de otro usuario → 403 (Forbidden)", async () => {
+    mockG2Valid();
+
+    const res = await request(app)
+      .get(`/cart/${TEST_USER}`)
+      .set("Authorization", "Bearer someone-else");
+
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe("FORBIDDEN");
+  });
+
+  test("GET /cart con G2 timeout → 503 (Service Unavailable)", async () => {
+    mockG2Timeout();
+
+    const res = await request(app)
+      .get(`/cart/${TEST_USER}`)
+      .set("Authorization", `Bearer ${TEST_USER}`);
+
+    expect(res.status).toBe(503);
+    expect(res.body.code).toBe("SERVICE_UNAVAILABLE");
+  });
+
+  test("GET /cart con error 500 de G2 → 503 (Service Unavailable)", async () => {
+    mockG2Error500();
+
+    const res = await request(app)
+      .get(`/cart/${TEST_USER}`)
+      .set("Authorization", `Bearer ${TEST_USER}`);
+
+    expect(res.status).toBe(503);
+    expect(res.body.code).toBe("SERVICE_UNAVAILABLE");
+  });
+
+  test("POST /cart/:userId/items con token válido → 200", async () => {
+    mockG3ProductFetch("P-205", g3Products["P-205"]);
+
+    const res = await request(app)
+      .post(`/cart/${TEST_USER}/items`)
+      .set("Authorization", `Bearer ${TEST_USER}`)
+      .send({ productId: "P-205", quantity: 1 });
+
+    expect(res.status).toBe(200);
+  });
+
+  test("DELETE /cart/:userId/items/:productId con token válido → 204", async () => {
+    mockG3ProductFetch("P-205", g3Products["P-205"]);
+
+    await request(app)
+      .post(`/cart/${TEST_USER}/items`)
+      .set("Authorization", `Bearer ${TEST_USER}`)
+      .send({ productId: "P-205", quantity: 1 });
+
+    const res = await request(app)
+      .delete(`/cart/${TEST_USER}/items/P-205`)
+      .set("Authorization", `Bearer ${TEST_USER}`);
+
+    expect(res.status).toBe(204);
+  });
+
+  test("POST /checkout con token válido → 201", async () => {
+    mockG3ProductFetch("P-100", g3Products["P-100"]);
+    const checkoutAuthUser = `${CHECKOUT_USER}-auth`;
+
+    await request(app)
+      .get(`/cart/${checkoutAuthUser}`)
+      .set("Authorization", `Bearer ${checkoutAuthUser}`);
+    await request(app)
+      .post(`/cart/${checkoutAuthUser}/items`)
+      .set("Authorization", `Bearer ${checkoutAuthUser}`)
+      .send({ productId: "P-100", quantity: 1 });
+
+    const res = await request(app)
+      .post("/checkout")
+      .set("Authorization", `Bearer ${checkoutAuthUser}`)
+      .set("Idempotency-Key", randomUUID())
+      .send({ userId: checkoutAuthUser });
+
+    expect(res.status).toBe(201);
+
+    await cleanupUser(checkoutAuthUser);
   });
 });

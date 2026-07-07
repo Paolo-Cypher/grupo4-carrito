@@ -69,6 +69,77 @@ Accede en: **http://localhost:8000/docs**
 
 ---
 
+## Autenticación (E4 Integración)
+
+### Requerimiento
+Todos los endpoints requieren autenticación con token JWT emitido por **Grupo 2 (Identidad)**.
+
+### Headers Requeridos
+```
+Authorization: Bearer {access_token}    // OBLIGATORIO
+X-Correlation-Id: {uuid}                // Recomendado para trazabilidad
+```
+
+### Ejemplo: Obtener token y usar en G4
+
+#### 1. Login en G2 (obtener token)
+```bash
+curl -X POST https://auth-minimarket-cloud.onrender.com/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{
+    "email": "g4-test@correo.cl",
+    "password": "TestG4Clave123"
+  }'
+
+# Respuesta:
+{
+  "user": {
+    "user_id": "7a9b189c-80e4-4c30-99ab-9308acae08dd",
+    "business_user_id": "USR-11",
+    "email": "g4-test@correo.cl",
+    "role": "customer",
+    "status": "active"
+  },
+  "access_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+  "expires_in": 3600
+}
+```
+
+#### 2. Usar el token en G4
+```bash
+# Guardar el token
+TOKEN="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+
+# Obtener carrito (userId debe ser el business_user_id)
+curl http://localhost:3000/cart/USR-11 \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "X-Correlation-Id: 550e8400-e29b-41d4-a716-446655440000"
+
+# Agregar item al carrito
+curl -X POST http://localhost:3000/cart/USR-11/items \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"productId": "P-100", "quantity": 2}'
+```
+
+### Códigos de Error
+- **401 Unauthorized** — Token ausente, inválido o expirado
+- **403 Forbidden** — Usuario intenta acceder a carrito de otro usuario
+- **503 Service Unavailable** — Servicio de identidad (G2) no disponible
+
+### Estructura de Error
+```json
+{
+  "timestamp": "2026-07-07T12:00:00Z",
+  "status": 401,
+  "code": "UNAUTHORIZED",
+  "message": "Token requerido",
+  "correlationId": "550e8400-e29b-41d4-a716-446655440000"
+}
+```
+
+---
+
 ## Deployment en Render
 
 ### URL en vivo
@@ -89,6 +160,9 @@ Agrega estas variables (obtén los valores de tu Supabase y del servicio de G5):
 | `SUPABASE_ANON_KEY` | Tu Publishable Key de Supabase |
 | `G3_CATALOG_URL` | Base URL del catálogo de Grupo 3 (`https://catalog-api-cm1l.onrender.com/api/v1`) |
 | `G5_ORDERS_URL` | URL completa del POST /orders de G5 |
+| `G2_AUTH_URL` | Base URL de autenticación de Grupo 2 (`https://auth-minimarket-cloud.onrender.com`) |
+| `G2_AUTH_VALIDATE_ENDPOINT` | Path del endpoint de validación de token (`/auth/validate`) |
+| `REQUEST_TIMEOUT` | Timeout en ms para la validación de token contra G2 (`5000`) |
 
 **IMPORTANTE:** Nunca compartir estos valores ni subirlos a GitHub.
 
@@ -253,7 +327,17 @@ Row Level Security habilitado con policies permisivas para anon role.
 ## Integración con otros grupos
 
 - **G1 (Frontend):** Llama a nuestros 4 endpoints REST. Usa Swagger en `/docs`
+- **G2 (Identidad):** Nosotros les llamamos para validar el token en cada request (implementa P2)
 - **G5 (Pedidos):** Nosotros les llamamos en POST /checkout (implementa P2)
+
+### Integración con G2
+
+Un middleware global (`authMiddleware`) valida el header `Authorization: Bearer {token}`
+en cada request contra `GET {G2_AUTH_URL}{G2_AUTH_VALIDATE_ENDPOINT}`, propagando
+`X-Correlation-Id`. Si el token es válido, se adjunta `req.user` (con `business_user_id`,
+`email`, `role`, `status`) y cada endpoint valida que el `userId` de la ruta coincida con
+`req.user.business_user_id` antes de continuar. Ver sección
+[Autenticación (E4 Integración)](#autenticación-e4-integración) para el detalle completo.
 
 ### Integración con G5
 
@@ -306,6 +390,7 @@ grupo4-carrito/
 
 ## Siguientes pasos (E4/E5)
 
+- [x] Autenticación JWT real contra G2 en los endpoints (middleware `authMiddleware`)
 - [ ] Mejorar RLS policies con autenticación real (G2)
 - [ ] Implementar reintentos para llamadas a G5
 - [ ] Circuit breaker para resiliencia

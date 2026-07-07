@@ -120,12 +120,21 @@ const swaggerSpec = {
         },
       },
     },
+    securitySchemes: {
+      BearerAuth: {
+        type: "http",
+        scheme: "bearer",
+        bearerFormat: "JWT",
+        description: "JWT token emitido por G2 (Grupo Identidad)",
+      },
+    },
   },
   paths: {
     "/cart/{userId}": {
       get: {
         tags: ["Cart"],
         summary: "Ver carrito (lo crea si no existe)",
+        security: [{ BearerAuth: [] }],
         parameters: [
           {
             name: "userId",
@@ -152,6 +161,30 @@ const swaggerSpec = {
               },
             },
           },
+          401: {
+            description: "Token ausente, inválido o expirado",
+            content: {
+              "application/json": {
+                schema: { $ref: "#/components/schemas/Error" },
+              },
+            },
+          },
+          403: {
+            description: "El userId no coincide con el usuario del token",
+            content: {
+              "application/json": {
+                schema: { $ref: "#/components/schemas/Error" },
+              },
+            },
+          },
+          503: {
+            description: "Servicio de identidad (G2) no disponible",
+            content: {
+              "application/json": {
+                schema: { $ref: "#/components/schemas/Error" },
+              },
+            },
+          },
           500: {
             description: "Error interno",
             content: {
@@ -167,6 +200,7 @@ const swaggerSpec = {
       post: {
         tags: ["Cart"],
         summary: "Agregar producto al carrito",
+        security: [{ BearerAuth: [] }],
         parameters: [
           {
             name: "userId",
@@ -207,6 +241,22 @@ const swaggerSpec = {
               },
             },
           },
+          401: {
+            description: "Token ausente, inválido o expirado",
+            content: {
+              "application/json": {
+                schema: { $ref: "#/components/schemas/Error" },
+              },
+            },
+          },
+          403: {
+            description: "El userId no coincide con el usuario del token",
+            content: {
+              "application/json": {
+                schema: { $ref: "#/components/schemas/Error" },
+              },
+            },
+          },
           404: {
             description: "Producto no encontrado en catálogo",
             content: {
@@ -217,7 +267,7 @@ const swaggerSpec = {
             },
           },
           503: {
-            description: "Catálogo de Grupo 3 no disponible",
+            description: "Catálogo de Grupo 3 o servicio de identidad (G2) no disponible",
             content: {
               "application/json": {
                 schema: { $ref: "#/components/schemas/Error" },
@@ -240,6 +290,7 @@ const swaggerSpec = {
       delete: {
         tags: ["Cart"],
         summary: "Eliminar producto del carrito",
+        security: [{ BearerAuth: [] }],
         parameters: [
           {
             name: "userId",
@@ -270,12 +321,36 @@ const swaggerSpec = {
               },
             },
           },
+          401: {
+            description: "Token ausente, inválido o expirado",
+            content: {
+              "application/json": {
+                schema: { $ref: "#/components/schemas/Error" },
+              },
+            },
+          },
+          403: {
+            description: "El userId no coincide con el usuario del token",
+            content: {
+              "application/json": {
+                schema: { $ref: "#/components/schemas/Error" },
+              },
+            },
+          },
           404: {
             description: "Carrito o item no encontrado",
             content: {
               "application/json": {
                 schema: { $ref: "#/components/schemas/Error" },
                 example: { detail: "Item not found" },
+              },
+            },
+          },
+          503: {
+            description: "Servicio de identidad (G2) no disponible",
+            content: {
+              "application/json": {
+                schema: { $ref: "#/components/schemas/Error" },
               },
             },
           },
@@ -294,6 +369,7 @@ const swaggerSpec = {
       post: {
         tags: ["Checkout"],
         summary: "Procesar checkout (idempotente)",
+        security: [{ BearerAuth: [] }],
         parameters: [
           {
             name: "Idempotency-Key",
@@ -334,6 +410,30 @@ const swaggerSpec = {
               "application/json": {
                 schema: { $ref: "#/components/schemas/Error" },
                 example: { detail: "Carrito vacío" },
+              },
+            },
+          },
+          401: {
+            description: "Token ausente, inválido o expirado",
+            content: {
+              "application/json": {
+                schema: { $ref: "#/components/schemas/Error" },
+              },
+            },
+          },
+          403: {
+            description: "El userId no coincide con el usuario del token",
+            content: {
+              "application/json": {
+                schema: { $ref: "#/components/schemas/Error" },
+              },
+            },
+          },
+          503: {
+            description: "Servicio de identidad (G2) no disponible",
+            content: {
+              "application/json": {
+                schema: { $ref: "#/components/schemas/Error" },
               },
             },
           },
@@ -385,6 +485,9 @@ const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseKey = process.env.SUPABASE_ANON_KEY;
 const g5OrdersUrl = process.env.G5_ORDERS_URL;
 const g3CatalogUrl = process.env.G3_CATALOG_URL || "https://catalog-api-cm1l.onrender.com/api/v1";
+const g2AuthUrl = process.env.G2_AUTH_URL || "https://auth-minimarket-cloud.onrender.com";
+const g2AuthValidateEndpoint = process.env.G2_AUTH_VALIDATE_ENDPOINT || "/auth/validate";
+const requestTimeoutMs = Number(process.env.REQUEST_TIMEOUT || 5000);
 
 if (!supabaseUrl || !supabaseKey) {
   throw new Error("SUPABASE_URL y SUPABASE_ANON_KEY son requeridos");
@@ -433,6 +536,87 @@ function errorResponse(res, status, code, message, correlationId) {
     message,
     correlationId,
   });
+}
+
+// ============================================
+// AUTENTICACIÓN / AUTORIZACIÓN (G2)
+// ============================================
+
+async function validateTokenWithG2(token, correlationId) {
+  const url = `${g2AuthUrl}${g2AuthValidateEndpoint}`;
+  const controller = new AbortController();
+  const timeoutHandle = setTimeout(() => controller.abort(), requestTimeoutMs);
+
+  console.log(`[G2] correlationId=${correlationId} | validating token`);
+
+  try {
+    const response = await fetch(url, {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "X-Correlation-Id": correlationId,
+      },
+      signal: controller.signal,
+    });
+
+    console.log(`[G2] correlationId=${correlationId} | status=${response.status}`);
+
+    if (response.status >= 500) {
+      throw new HttpException(503, "SERVICE_UNAVAILABLE", "G2 no responde");
+    }
+
+    if (!response.ok) {
+      throw new HttpException(401, "UNAUTHORIZED", "Token inválido o expirado");
+    }
+
+    return await response.json();
+  } catch (error) {
+    if (error instanceof HttpException) {
+      console.error(`[G2] correlationId=${correlationId} | error: ${error.message}`);
+      throw error;
+    }
+
+    if (error && error.name === "AbortError") {
+      console.error(`[G2] correlationId=${correlationId} | error: timeout`);
+      throw new HttpException(503, "SERVICE_UNAVAILABLE", "G2 no responde");
+    }
+
+    console.error(`[G2] correlationId=${correlationId} | error: ${error.message}`);
+    throw new HttpException(503, "SERVICE_UNAVAILABLE", `G2 no responde: ${error.message}`);
+  } finally {
+    clearTimeout(timeoutHandle);
+  }
+}
+
+async function authMiddleware(req, res, next) {
+  const authHeader = req.headers["authorization"] || "";
+  const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7).trim() : "";
+
+  if (!token) {
+    console.log(`[AUTH] correlationId=${req.correlationId} | Token requerido`);
+    return errorResponse(res, 401, "UNAUTHORIZED", "Token requerido", req.correlationId);
+  }
+
+  try {
+    req.user = await validateTokenWithG2(token, req.correlationId);
+    console.log(
+      `[AUTH] correlationId=${req.correlationId} | Auth OK: ${req.user && req.user.business_user_id}`
+    );
+    return next();
+  } catch (error) {
+    return handleError(req, res, error);
+  }
+}
+
+function checkOwnership(req, targetUserId) {
+  const businessUserId = req.user && req.user.business_user_id;
+  if (!businessUserId || businessUserId !== targetUserId) {
+    throw new HttpException(
+      403,
+      "FORBIDDEN",
+      "El usuario del token no coincide con el recurso solicitado"
+    );
+  }
 }
 
 // ============================================
@@ -674,6 +858,8 @@ function parseCheckoutRequest(body) {
   return { userId: body.userId };
 }
 
+app.use(authMiddleware);
+
 // ============================================
 // ENDPOINT 1: Ver carrito
 // ============================================
@@ -681,6 +867,7 @@ function parseCheckoutRequest(body) {
 app.get("/cart/:userId", async (req, res) => {
   try {
     const userId = normalizeUserId(req.params.userId);
+    checkOwnership(req, userId);
 
     // Obtener o crear carrito
     const result = await run(
@@ -735,6 +922,7 @@ app.get("/cart/:userId", async (req, res) => {
 app.post("/cart/:userId/items", async (req, res) => {
   try {
     const userId = normalizeUserId(req.params.userId);
+    checkOwnership(req, userId);
     const data = parseAddItemRequest(req.body);
 
     const catalogProduct = await fetchG3Product(data.productId);
@@ -825,6 +1013,7 @@ app.post("/cart/:userId/items", async (req, res) => {
 app.delete("/cart/:userId/items/:productId", async (req, res) => {
   try {
     const userId = normalizeUserId(req.params.userId);
+    checkOwnership(req, userId);
     const productId = req.params.productId;
 
     // Obtener carrito
@@ -886,6 +1075,7 @@ app.post("/checkout", async (req, res) => {
   try {
     const data = parseCheckoutRequest(req.body);
     const userId = normalizeUserId(data.userId);
+    checkOwnership(req, userId);
     const idempotencyKey = req.get("Idempotency-Key");
 
     if (!userId || !idempotencyKey) {
