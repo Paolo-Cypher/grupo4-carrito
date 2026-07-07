@@ -37,7 +37,8 @@ const swaggerSpec = {
     version: "1.0.0",
     description:
       "Microservicio de carrito de compras (Node.js + Express + Supabase). " +
-      "Incluye gestión de items, validación de carrito CHECKED_OUT y checkout idempotente.",
+      "Incluye gestión de items, consulta de precio al catálogo de Grupo 3, " +
+      "validación de carrito CHECKED_OUT y checkout idempotente.",
   },
   servers: [{ url: "/", description: "Servidor actual" }],
   tags: [
@@ -207,11 +208,20 @@ const swaggerSpec = {
             },
           },
           404: {
-            description: "Carrito no encontrado",
+            description: "Producto no encontrado en catálogo",
             content: {
               "application/json": {
                 schema: { $ref: "#/components/schemas/Error" },
-                example: { detail: "Cart not found" },
+                example: { detail: "Producto no encontrado" },
+              },
+            },
+          },
+          503: {
+            description: "Catálogo de Grupo 3 no disponible",
+            content: {
+              "application/json": {
+                schema: { $ref: "#/components/schemas/Error" },
+                example: { detail: "Grupo 3 no responde" },
               },
             },
           },
@@ -374,6 +384,7 @@ app.use("/docs", swaggerUi.serve, swaggerUi.setup(swaggerSpec));
 const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseKey = process.env.SUPABASE_ANON_KEY;
 const g5OrdersUrl = process.env.G5_ORDERS_URL;
+const g3CatalogUrl = process.env.G3_CATALOG_URL || "https://catalog-api-cm1l.onrender.com/api/v1";
 
 if (!supabaseUrl || !supabaseKey) {
   throw new Error("SUPABASE_URL y SUPABASE_ANON_KEY son requeridos");
@@ -448,6 +459,101 @@ function buildG5OrderPayload(userId, cartId, items, totalAmount) {
     })),
     totalAmount: totalAmount,
   };
+}
+
+async function rollbackCheckout(cartId, idempotencyKey) {
+  await run(
+    supabase.from("carts").update({ status: "ACTIVE" }).eq("id", cartId)
+  );
+  await run(
+    supabase
+      .from("checkout_attempts")
+      .update({ status: "FAILED" })
+      .eq("cart_id", cartId)
+      .eq("idempotency_key", idempotencyKey)
+  );
+}
+
+function buildG3ItemUrl(productId) {
+  const catalogBaseUrl = g3CatalogUrl.trim();
+  if (!catalogBaseUrl) {
+    throw new HttpException(503, "SERVICE_UNAVAILABLE", "G3_CATALOG_URL no configurada");
+  }
+
+  const normalizedBase = catalogBaseUrl.replace(/\/+$/, "");
+  const basePath = normalizedBase.endsWith("/products")
+    ? normalizedBase
+    : `${normalizedBase}/products`;
+
+  return `${basePath}/${encodeURIComponent(productId)}`;
+}
+
+async function fetchG3Product(productId) {
+  let itemUrl;
+  try {
+    itemUrl = buildG3ItemUrl(productId);
+  } catch (error) {
+    if (error instanceof HttpException) {
+      throw error;
+    }
+    throw new HttpException(503, "SERVICE_UNAVAILABLE", "No se pudo construir la URL de Grupo 3");
+  }
+
+  const timeoutMs = Number(process.env.G3_CATALOG_TIMEOUT_MS || 5000);
+  const controller = new AbortController();
+  const timeoutHandle = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const response = await fetch(itemUrl, {
+      method: "GET",
+      headers: {
+        Accept: "application/json",
+        "X-Consumer": "grupo-4",
+      },
+      signal: controller.signal,
+    });
+
+    if (response.status === 404) {
+      throw new HttpException(404, "NOT_FOUND", "Producto no encontrado");
+    }
+
+    if (!response.ok) {
+      throw new HttpException(
+        503,
+        "SERVICE_UNAVAILABLE",
+        `Grupo 3 respondió ${response.status}`
+      );
+    }
+
+    const body = await response.json();
+    const price = Number(body.price ?? body.unit_price ?? body.unitPrice);
+
+    if (!Number.isFinite(price) || price < 0) {
+      throw new HttpException(
+        503,
+        "SERVICE_UNAVAILABLE",
+        "Grupo 3 devolvió un precio inválido"
+      );
+    }
+
+    return { price, raw: body };
+  } catch (error) {
+    if (error instanceof HttpException) {
+      throw error;
+    }
+
+    if (error && error.name === "AbortError") {
+      throw new HttpException(503, "SERVICE_UNAVAILABLE", "Grupo 3 no responde");
+    }
+
+    throw new HttpException(
+      503,
+      "SERVICE_UNAVAILABLE",
+      `Grupo 3 no responde: ${error.message}`
+    );
+  } finally {
+    clearTimeout(timeoutHandle);
+  }
 }
 
 function createOrderInG5(payload, idempotencyKey, requestId, correlationId) {
@@ -631,6 +737,9 @@ app.post("/cart/:userId/items", async (req, res) => {
     const userId = normalizeUserId(req.params.userId);
     const data = parseAddItemRequest(req.body);
 
+    const catalogProduct = await fetchG3Product(data.productId);
+    const catalogPrice = catalogProduct.price;
+
     // Obtener carrito
     const cartData = await run(
       supabase
@@ -668,23 +777,24 @@ app.post("/cart/:userId/items", async (req, res) => {
     if (existingItem && existingItem.length > 0) {
       // Producto existe → sumar cantidad
       const newQuantity = existingItem[0].quantity + data.quantity;
-      const newSubtotal = newQuantity * 14990;
+      const unitPrice = Number(existingItem[0].unit_price ?? catalogPrice);
+      const newSubtotal = newQuantity * unitPrice;
       await run(
         supabase
           .from("cart_items")
-          .update({ quantity: newQuantity, subtotal: newSubtotal })
+          .update({ quantity: newQuantity, subtotal: newSubtotal, unit_price: unitPrice })
           .eq("cart_id", cartId)
           .eq("product_id", data.productId)
       );
     } else {
       // Producto no existe → insertar
-      const subtotal = data.quantity * 14990;
+      const subtotal = data.quantity * catalogPrice;
       await run(
         supabase.from("cart_items").insert({
           cart_id: cartId,
           product_id: data.productId,
           quantity: data.quantity,
-          unit_price: 14990,
+          unit_price: catalogPrice,
           subtotal: subtotal,
         })
       );
@@ -840,26 +950,24 @@ app.post("/checkout", async (req, res) => {
     );
 
     const g5Payload = buildG5OrderPayload(userId, cartId, items, totalAmount);
-    const g5Response = await createOrderInG5(
-      g5Payload,
-      idempotencyKey,
-      req.requestId,
-      req.correlationId
-    );
+    let g5Response;
+    try {
+      g5Response = await createOrderInG5(
+        g5Payload,
+        idempotencyKey,
+        req.requestId,
+        req.correlationId
+      );
+    } catch (error) {
+      await rollbackCheckout(cartId, idempotencyKey);
+      throw error;
+    }
+
     const orderId = g5Response.orderNumber || g5Response.orderId || g5Response.order_id;
 
     if (!orderId) {
-      await run(
-        supabase.from("carts").update({ status: "ACTIVE" }).eq("id", cartId)
-      );
-      await run(
-        supabase
-          .from("checkout_attempts")
-          .update({ status: "FAILED" })
-          .eq("cart_id", cartId)
-          .eq("idempotency_key", idempotencyKey)
-      );
-      throw new HttpException(500, "INTERNAL_SERVER_ERROR", "G5 no devolvió orderId");
+      await rollbackCheckout(cartId, idempotencyKey);
+      throw new HttpException(500, "INTERNAL_SERVER_ERROR", "G5 no devolvió orderNumber");
     }
 
     await run(

@@ -87,6 +87,7 @@ Agrega estas variables (obtén los valores de tu Supabase y del servicio de G5):
 | `DATABASE_URL` | Tu connection string de Supabase |
 | `SUPABASE_URL` | Tu Project URL de Supabase |
 | `SUPABASE_ANON_KEY` | Tu Publishable Key de Supabase |
+| `G3_CATALOG_URL` | Base URL del catálogo de Grupo 3 (`https://catalog-api-cm1l.onrender.com/api/v1`) |
 | `G5_ORDERS_URL` | URL completa del POST /orders de G5 |
 
 **IMPORTANTE:** Nunca compartir estos valores ni subirlos a GitHub.
