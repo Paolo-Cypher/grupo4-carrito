@@ -488,7 +488,7 @@ function buildG3ItemUrl(productId) {
   return `${basePath}/${encodeURIComponent(productId)}`;
 }
 
-async function fetchG3Product(productId) {
+async function fetchG3Product(productId, requestId, correlationId) {
   let itemUrl;
   try {
     itemUrl = buildG3ItemUrl(productId);
@@ -509,6 +509,8 @@ async function fetchG3Product(productId) {
       headers: {
         Accept: "application/json",
         "X-Consumer": "grupo-4",
+        "X-Request-Id": requestId,
+        "X-Correlation-Id": correlationId,
       },
       signal: controller.signal,
     });
@@ -737,9 +739,9 @@ app.post("/cart/:userId/items", async (req, res) => {
     const userId = normalizeUserId(req.params.userId);
     const data = parseAddItemRequest(req.body);
 
-    const catalogProduct = await fetchG3Product(data.productId);
+    const catalogProduct = await fetchG3Product(data.productId, req.requestId, req.correlationId);
     const catalogPrice = catalogProduct.price;
-
+    
     // Obtener carrito
     const cartData = await run(
       supabase
