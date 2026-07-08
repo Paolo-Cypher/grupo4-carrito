@@ -484,7 +484,7 @@ app.use("/docs", swaggerUi.serve, swaggerUi.setup(swaggerSpec));
 const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseKey = process.env.SUPABASE_ANON_KEY;
 const g5OrdersUrl = process.env.G5_ORDERS_URL;
-const g3CatalogUrl = process.env.G3_CATALOG_URL || "https://catalog-api-cm1l.onrender.com/api/v1";
+const g3CatalogUrl = process.env.G3_CATALOG_URL || "https://catalog-api-cm1l.onrender.com/api/v1/products/0e319c09-7aa8-4162-b0dd-7f8e6f5a610a";
 const g2AuthUrl = process.env.G2_AUTH_URL || "https://auth-minimarket-cloud.onrender.com";
 const g2AuthValidateEndpoint = process.env.G2_AUTH_VALIDATE_ENDPOINT || "/auth/validate";
 const requestTimeoutMs = Number(process.env.REQUEST_TIMEOUT || 5000);
