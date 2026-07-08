@@ -631,6 +631,9 @@ app.post("/cart/:userId/items", async (req, res) => {
     const userId = normalizeUserId(req.params.userId);
     const data = parseAddItemRequest(req.body);
 
+    const catalogProduct = await fetchG3Product(data.productId, req.requestId, req.correlationId);
+    const catalogPrice = catalogProduct.price;
+    
     // Obtener carrito
     const cartData = await run(
       supabase
