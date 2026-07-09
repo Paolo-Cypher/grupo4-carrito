@@ -225,10 +225,10 @@ describe("POST /cart/:userId/items", () => {
       .send({ productId: "P-100", quantity: 1 });
 
     expect(res.status).toBe(200);
-    const item = res.body.items.find((i) => i.product_id === "P-100");
+    const item = res.body.items.find((i) => i.productId === "P-100");
     expect(item).toBeDefined();
     expect(item.quantity).toBe(1);
-    expect(item.unit_price).toBe(14990);
+    expect(item.unitPrice).toBe(14990);
     expect(item.subtotal).toBe(14990);
   });
 
@@ -279,10 +279,10 @@ describe("POST /cart/:userId/items", () => {
       .send({ productId: "P-200", quantity: 3 });
 
     expect(res.status).toBe(200);
-    const item = res.body.items.find((i) => i.product_id === "P-200");
+    const item = res.body.items.find((i) => i.productId === "P-200");
     expect(item).toBeDefined();
     expect(item.quantity).toBe(5);
-    expect(item.unit_price).toBe(20000);
+    expect(item.unitPrice).toBe(20000);
     expect(item.subtotal).toBe(100000);
   });
 

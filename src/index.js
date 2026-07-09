@@ -542,7 +542,7 @@ function errorResponse(res, status, code, message, correlationId) {
 // AUTENTICACIÓN / AUTORIZACIÓN (G2)
 // ============================================
 
-async function validateTokenWithG2(token, correlationId) {
+async function validateTokenWithG2(token, requestId, correlationId) {
   const url = `${g2AuthUrl}${g2AuthValidateEndpoint}`;
   const controller = new AbortController();
   const timeoutHandle = setTimeout(() => controller.abort(), requestTimeoutMs);
@@ -554,7 +554,9 @@ async function validateTokenWithG2(token, correlationId) {
       method: "GET",
       headers: {
         Authorization: `Bearer ${token}`,
+        "X-Request-Id": requestId,
         "X-Correlation-Id": correlationId,
+        "X-Consumer": "grupo-4",
       },
       signal: controller.signal,
     });
@@ -598,7 +600,7 @@ async function authMiddleware(req, res, next) {
   }
 
   try {
-    req.user = await validateTokenWithG2(token, req.correlationId);
+    req.user = await validateTokenWithG2(token, req.requestId, req.correlationId);
     req.token = token;
     console.log(
       `[AUTH] correlationId=${req.correlationId} | Auth OK: ${req.user && req.user.business_user_id}`
@@ -632,17 +634,41 @@ function normalizeUserId(userId) {
   return normalized;
 }
 
-function buildG5OrderPayload(userId, cartId, items, totalAmount) {
+// Mapea una fila de cart_items (snake_case de Postgres) al contrato camelCase.
+function mapCartItem(item) {
+  return {
+    id: item.id,
+    productId: item.product_id,
+    quantity: item.quantity,
+    unitPrice: parseFloat(item.unit_price),
+    subtotal: parseFloat(item.subtotal),
+  };
+}
+
+// Arma la respuesta de carrito según el contrato (items en camelCase y
+// totalAmount recalculado como SUM(subtotal) sobre los items ya mapeados).
+function mapCartResponse(cartId, userId, status, items, createdAt, updatedAt) {
+  const mappedItems = (items || []).map(mapCartItem);
+  const totalAmount = mappedItems.reduce((sum, i) => sum + i.subtotal, 0);
+  return {
+    id: cartId,
+    userId: userId,
+    status: status,
+    items: mappedItems,
+    totalAmount: totalAmount,
+    createdAt: createdAt,
+    updatedAt: updatedAt,
+  };
+}
+
+function buildG5OrderPayload(userId, items) {
   return {
     userId: userId,
-    cartId: cartId,
     items: items.map((item) => ({
       productId: item.product_id,
       quantity: item.quantity,
-      unitPrice: item.unit_price,
-      subtotal: item.subtotal,
+      unitPrice: parseFloat(item.unit_price),
     })),
-    totalAmount: totalAmount,
   };
 }
 
@@ -794,6 +820,16 @@ function createOrderInG5(payload, idempotencyKey, requestId, correlationId, toke
       response.on("end", () => {
         const statusCode = response.statusCode || 0;
         console.log(`[G5] correlationId=${correlationId} | status=${statusCode}`);
+        if (statusCode === 422) {
+          reject(
+            new HttpException(
+              422,
+              "OUT_OF_STOCK",
+              `G5 respondió 422: ${responseText || response.statusMessage}`
+            )
+          );
+          return;
+        }
         if (statusCode >= 400) {
           reject(
             new HttpException(
@@ -887,7 +923,7 @@ app.get("/cart/:userId", async (req, res) => {
         .eq("status", "ACTIVE")
     );
 
-    let cartId;
+    let cart;
     if (!result || result.length === 0) {
       // Si no existe carrito activo, crear uno
       const newCart = await run(
@@ -896,29 +932,30 @@ app.get("/cart/:userId", async (req, res) => {
           .insert({ user_id: userId, status: "ACTIVE" })
           .select()
       );
-      cartId = newCart[0].id;
+      cart = newCart[0];
     } else {
-      cartId = result[0].id;
+      cart = result[0];
     }
+
+    const cartId = cart.id;
 
     // Obtener items del carrito
     const items = await run(
       supabase.from("cart_items").select("*").eq("cart_id", cartId)
     );
 
-    // Calcular total
-    const totalAmount =
-      items && items.length > 0
-        ? items.reduce((acc, item) => acc + item.subtotal, 0)
-        : 0;
-
-    return res.status(200).json({
-      id: cartId,
-      userId: userId,
-      status: "ACTIVE",
-      items: items || [],
-      totalAmount: totalAmount,
-    });
+    return res
+      .status(200)
+      .json(
+        mapCartResponse(
+          cartId,
+          userId,
+          cart.status,
+          items,
+          cart.created_at,
+          cart.updated_at
+        )
+      );
   } catch (e) {
     return handleError(req, res, e);
   }
@@ -1001,15 +1038,19 @@ app.post("/cart/:userId/items", async (req, res) => {
     const items = await run(
       supabase.from("cart_items").select("*").eq("cart_id", cartId)
     );
-    const totalAmount = items.reduce((acc, item) => acc + item.subtotal, 0);
 
-    return res.status(200).json({
-      id: cartId,
-      userId: userId,
-      status: cart.status,
-      items: items,
-      totalAmount: totalAmount,
-    });
+    return res
+      .status(200)
+      .json(
+        mapCartResponse(
+          cartId,
+          userId,
+          cart.status,
+          items,
+          cart.created_at,
+          cart.updated_at
+        )
+      );
   } catch (e) {
     return handleError(req, res, e);
   }
@@ -1132,23 +1173,25 @@ app.post("/checkout", async (req, res) => {
       throw new HttpException(400, "EMPTY_CART", "Carrito vacío");
     }
 
-    const totalAmount = items.reduce((acc, item) => acc + item.subtotal, 0);
-
     // Registrar intento antes de llamar a G5
-    await run(
-      supabase.from("checkout_attempts").insert({
-        cart_id: cartId,
-        idempotency_key: idempotencyKey,
-        status: "PENDING",
-      })
+    const attemptRows = await run(
+      supabase
+        .from("checkout_attempts")
+        .insert({
+          cart_id: cartId,
+          idempotency_key: idempotencyKey,
+          status: "PENDING",
+        })
+        .select()
     );
+    const attemptId = attemptRows[0].id;
 
     // Marcar carrito como CHECKED_OUT
     await run(
       supabase.from("carts").update({ status: "CHECKED_OUT" }).eq("id", cartId)
     );
 
-    const g5Payload = buildG5OrderPayload(userId, cartId, items, totalAmount);
+    const g5Payload = buildG5OrderPayload(userId, items);
     let g5Response;
     try {
       g5Response = await createOrderInG5(
@@ -1179,9 +1222,10 @@ app.post("/checkout", async (req, res) => {
     );
 
     return res.status(201).json({
+      attemptId: attemptId,
       orderId: orderId,
-      status: "CREATED",
-      totalAmount: totalAmount,
+      status: "SUCCESS",
+      message: "Checkout completado exitosamente.",
     });
   } catch (e) {
     return handleError(req, res, e);
