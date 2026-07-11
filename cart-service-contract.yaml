@@ -1,0 +1,348 @@
+openapi: 3.0.3
+info:
+  title: Cart and Checkout API
+  description: |
+    Módulo de Carro y Checkout del ecosistema Mini Marketplace Cloud.
+    Gestiona el ciclo de vida del carrito y genera la intención de pedido.
+   
+    
+    Grupo 4 — Carro y Checkout
+  version: "1.0"
+  contact:
+    name: Grupo 4
+
+servers:
+  - url: https://cart-service.onrender.com
+    description: Producción (cloud free)
+  - url: http://localhost:3000
+    description: Desarrollo local
+
+# ---------------------------------------------
+
+paths:
+  /cart/{userId}:
+    get:
+      summary: Obtener el carrito activo
+      description: |
+        Retorna el carrito activo de un usuario con todos sus ítems.
+        El total del carrito se calcula dinámicamente con SUM(subtotal) para evitar desincronizaciones.
+      operationId: getCart
+      tags:
+        - Cart
+      parameters:
+        - $ref: '#/components/parameters/RequestId'
+        - $ref: '#/components/parameters/CorrelationId'
+        - name: userId
+          in: path
+          description: ID del usuario como texto plano sin FK
+          required: true
+          schema:
+            type: string
+          example: "USR-01"
+      responses:
+        '200':
+          description: Carrito obtenido exitosamente
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CartResponse'
+        '404':
+          description: Carrito no encontrado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /cart/{userId}/items:
+    post:
+      summary: Agregar o actualizar producto en el carrito
+      description: |
+        Agrega un producto al carrito. Si el producto ya existe, actualiza su cantidad en lugar de insertar uno nuevo.
+        El precio se consulta al Catálogo y se guarda como snapshot.
+      operationId: addItemToCart
+      tags:
+        - Cart
+      parameters:
+        - $ref: '#/components/parameters/RequestId'
+        - $ref: '#/components/parameters/CorrelationId'
+        - name: userId
+          in: path
+          description: ID del usuario
+          required: true
+          schema:
+            type: string
+          example: "USR-01"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AddItemRequest'
+      responses:
+        '200':
+          description: Ítem agregado o actualizado exitosamente
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CartResponse'
+        '400':
+          description: Request inválido
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /cart/{userId}/items/{productId}:
+    delete:
+      summary: Eliminar producto del carrito
+      description: |
+        Elimina permanentemente un producto del carrito.
+        No hay recuperación posible ya que el soft-delete no está implementado.
+      operationId: removeItemFromCart
+      tags:
+        - Cart
+      parameters:
+        - $ref: '#/components/parameters/RequestId'
+        - $ref: '#/components/parameters/CorrelationId'
+        - name: userId
+          in: path
+          required: true
+          schema:
+            type: string
+          example: "USR-01"
+        - name: productId
+          in: path
+          required: true
+          schema:
+            type: string
+          example: "P-100"
+      responses:
+        '204':
+          description: Ítem eliminado exitosamente (Sin contenido)
+        '404':
+          description: Ítem o carrito no encontrado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /checkout:
+    post:
+      summary: Procesar el checkout del carrito
+      description: |
+        Valida el carrito y registra el intento en checkout_attempts.
+        Llama a Grupo 5 para crear el pedido y marca el carrito como CHECKED_OUT.
+        Usa Idempotency-Key para prevenir la creación duplicada de pedidos.
+      operationId: processCheckout
+      tags:
+        - Checkout
+      parameters:
+        - $ref: '#/components/parameters/RequestId'
+        - $ref: '#/components/parameters/CorrelationId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CheckoutRequest'
+      responses:
+        '201':
+          description: Checkout exitoso, pedido creado en Grupo 5
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CheckoutResponse'
+        '400':
+          description: Carrito vacío o datos inválidos
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: Intento de checkout duplicado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                timestamp: "2026-05-25T10:05:00Z"
+                status: 409
+                code: "DUPLICATED_ORDER"
+                message: "El intento de checkout ya fue procesado previamente"
+                correlationId: "abc-123"
+        '422':
+          description: Sin stock disponible (Error detectado por G5)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                timestamp: "2026-05-25T10:05:00Z"
+                status: 422
+                code: "OUT_OF_STOCK"
+                message: "El producto no tiene stock suficiente"
+                correlationId: "abc-123"
+
+components:
+  parameters:
+    RequestId:
+      name: X-Request-Id
+      in: header
+      required: true
+      schema:
+        type: string
+        format: uuid
+      example: "550e8400-e29b-41d4-a716-446655440000"
+
+    CorrelationId:
+      name: X-Correlation-Id
+      in: header
+      required: true
+      schema:
+        type: string
+        format: uuid
+      example: "660e8400-e29b-41d4-a716-446655440111"
+
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: Clave única enviada por el cliente. Garantiza que el mismo intento no se procese dos veces.
+      schema:
+        type: string
+        format: uuid
+      example: "770e8400-e29b-41d4-a716-446655440222"
+
+  schemas:
+    CartStatus:
+      type: string
+      enum:
+        - ACTIVE
+        - CHECKED_OUT
+        - ABANDONED
+      description: Estado del carrito. Solo puede haber un ACTIVE a la vez.
+
+    CartItem:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+          example: "880e8400-e29b-41d4-a716-446655440333"
+        productId:
+          type: string
+          description: ID del producto guardado como texto plano sin FK
+          example: "P-100"
+        quantity:
+          type: integer
+          minimum: 1
+          example: 2
+        unitPrice:
+          type: number
+          format: float
+          description: Precio unitario al momento de agregar. No se actualiza si el catálogo cambia.
+          example: 14990
+        subtotal:
+          type: number
+          format: float
+          readOnly: true
+          description: Calculado en el backend antes de insertar.
+          example: 29980
+
+    CartResponse:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+          example: "990e8400-e29b-41d4-a716-446655440444"
+        userId:
+          type: string
+          example: "USR-01"
+        status:
+          $ref: '#/components/schemas/CartStatus'
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/CartItem'
+        totalAmount:
+          type: number
+          format: float
+          readOnly: true
+          description: Suma dinámica de los subtotales de los ítems.
+          example: 49970
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    AddItemRequest:
+      type: object
+      required:
+        - productId
+        - quantity
+      properties:
+        productId:
+          type: string
+          example: "P-100"
+        quantity:
+          type: integer
+          minimum: 1
+          example: 2
+
+    CheckoutRequest:
+      type: object
+      required:
+        - userId
+      properties:
+        userId:
+          type: string
+          example: "USR-01"
+
+    CheckoutResponse:
+      type: object
+      properties:
+        attemptId:
+          type: string
+          format: uuid
+          description: Identificador único del intento de checkout
+          example: "111e8400-e29b-41d4-a716-446655440555"
+        orderId:
+          type: string
+          description: ID del pedido devuelto por Grupo 5
+          example: "ORD-1001"
+        status:
+          type: string
+          enum:
+            - PENDING
+            - SUCCESS
+            - FAILED
+          description: Estado del intento de checkout
+          example: "SUCCESS"
+        message:
+          type: string
+          example: "Checkout completado exitosamente."
+
+    ErrorResponse:
+      type: object
+      required:
+        - timestamp
+        - status
+        - code
+        - message
+        - correlationId
+      properties:
+        timestamp:
+          type: string
+          format: date-time
+        status:
+          type: integer
+        code:
+          type: string
+        message:
+          type: string
+        correlationId:
+          type: string

@@ -500,7 +500,10 @@ const supabase = createClient(supabaseUrl, supabaseKey);
 async function run(query) {
   const { data, error } = await query;
   if (error) {
-    throw new Error(error.message);
+    const err = new Error(error.message);
+    err.code = error.code;
+    err.details = error.details;
+    throw err;
   }
   return data;
 }
@@ -1174,16 +1177,35 @@ app.post("/checkout", async (req, res) => {
     }
 
     // Registrar intento antes de llamar a G5
-    const attemptRows = await run(
-      supabase
-        .from("checkout_attempts")
-        .insert({
-          cart_id: cartId,
-          idempotency_key: idempotencyKey,
-          status: "PENDING",
-        })
-        .select()
-    );
+    let attemptRows;
+    try {
+      attemptRows = await run(
+        supabase
+          .from("checkout_attempts")
+          .insert({
+            cart_id: cartId,
+            idempotency_key: idempotencyKey,
+            status: "PENDING",
+          })
+          .select()
+      );
+    } catch (error) {
+      if (error.code === "23505") {
+        const raceWinner = await run(
+          supabase
+            .from("checkout_attempts")
+            .select("*")
+            .eq("idempotency_key", idempotencyKey)
+        );
+        const orderId = raceWinner && raceWinner[0] && raceWinner[0].order_id;
+        throw new HttpException(
+          409,
+          "DUPLICATED_ORDER",
+          `Intento duplicado, orderId existente: ${orderId ?? "N/A"}`
+        );
+      }
+      throw error;
+    }
     const attemptId = attemptRows[0].id;
 
     // Marcar carrito como CHECKED_OUT
@@ -1256,6 +1278,34 @@ function handleError(req, res, e) {
     correlationId
   );
 }
+
+// ============================================
+// MANEJO DE ERRORES DE EXPRESS (body JSON malformado, etc.)
+// ============================================
+
+app.use((err, req, res, next) => {
+  const correlationId =
+    req.correlationId || req.headers["x-correlation-id"] || randomUUID();
+
+  if (err.type === "entity.parse.failed" || err instanceof SyntaxError) {
+    return errorResponse(
+      res,
+      400,
+      "INVALID_REQUEST",
+      "El body de la request no es JSON válido",
+      correlationId
+    );
+  }
+
+  console.error("TRACING_ERROR | correlationId=" + correlationId + " | " + err.message);
+  return errorResponse(
+    res,
+    500,
+    "INTERNAL_SERVER_ERROR",
+    `Error: ${err.message}`,
+    correlationId
+  );
+});
 
 // ============================================
 // EJECUTAR SERVIDOR
