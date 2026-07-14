@@ -1,7 +1,30 @@
 const { randomUUID } = require("crypto");
-const request = require("supertest");
+const supertest = require("supertest");
 const { createClient } = require("@supabase/supabase-js");
 require("dotenv").config();
+
+// Headers de trazabilidad obligatorios en /cart y /checkout (contrato).
+// Se inyectan automáticamente en cada request de prueba vía el wrapper
+// `request()` de abajo, para no repetirlos en los ~30 call sites.
+const TRACE_HEADERS = {
+  "X-Request-Id": "11111111-1111-1111-1111-111111111111",
+  "X-Correlation-Id": "22222222-2222-2222-2222-222222222222",
+};
+
+// `rawRequest` = supertest sin headers de trazabilidad (para los tests que
+// verifican precisamente la ausencia de esos headers).
+const rawRequest = supertest;
+
+// `request(app).get/post/delete(url)` inyecta los headers de trazabilidad y
+// deja el resto del encadenamiento (.set, .send, etc.) intacto.
+function request(app) {
+  const agent = supertest(app);
+  return {
+    get: (url) => agent.get(url).set(TRACE_HEADERS),
+    post: (url) => agent.post(url).set(TRACE_HEADERS),
+    delete: (url) => agent.delete(url).set(TRACE_HEADERS),
+  };
+}
 
 // El test de timeout de G2 necesita un timeout corto: se fuerza aquí (después
 // de dotenv.config()) para no depender de si .env define REQUEST_TIMEOUT.
@@ -208,6 +231,38 @@ describe("GET /cart/:userId", () => {
     expect(res.status).toBe(400);
     expect(res.body.code).toBe("INVALID_REQUEST");
     expect(res.body.message).toBe("userId es requerido");
+  });
+});
+
+describe("Headers de trazabilidad obligatorios", () => {
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
+  test("GET /cart sin X-Request-Id → 400 MISSING_HEADER", async () => {
+    mockG2Valid();
+
+    const res = await rawRequest(app)
+      .get(`/cart/${TEST_USER}`)
+      .set("X-Correlation-Id", "22222222-2222-2222-2222-222222222222")
+      .set("Authorization", `Bearer ${TEST_USER}`);
+
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe("MISSING_HEADER");
+    expect(res.body.message).toBe("Header X-Request-Id es requerido");
+  });
+
+  test("GET /cart sin X-Correlation-Id → 400 MISSING_HEADER", async () => {
+    mockG2Valid();
+
+    const res = await rawRequest(app)
+      .get(`/cart/${TEST_USER}`)
+      .set("X-Request-Id", "11111111-1111-1111-1111-111111111111")
+      .set("Authorization", `Bearer ${TEST_USER}`);
+
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe("MISSING_HEADER");
+    expect(res.body.message).toBe("Header X-Correlation-Id es requerido");
   });
 });
 

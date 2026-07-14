@@ -16,13 +16,44 @@ app.use(express.json());
 // ============================================
 
 app.use((req, res, next) => {
-  req.requestId = req.headers["x-request-id"] || randomUUID();
-  req.correlationId = req.headers["x-correlation-id"] || randomUUID();
-  res.setHeader("x-request-id", req.requestId);
-  res.setHeader("x-correlation-id", req.correlationId);
-  console.log(
-    `[${req.method}] ${req.path} | requestId=${req.requestId} | correlationId=${req.correlationId}`
-  );
+  // Solo las rutas de negocio (/cart, /checkout) exigen los headers de
+  // trazabilidad. Swagger (/docs y sus assets) queda exento.
+  const requiresTracing =
+    req.path.startsWith("/cart") || req.path.startsWith("/checkout");
+
+  if (requiresTracing) {
+    const requestId = req.headers["x-request-id"];
+    const correlationId = req.headers["x-correlation-id"];
+
+    if (!requestId) {
+      return res.status(400).json({
+        timestamp: new Date().toISOString(),
+        status: 400,
+        code: "MISSING_HEADER",
+        message: "Header X-Request-Id es requerido",
+        correlationId: "N/A",
+      });
+    }
+
+    if (!correlationId) {
+      return res.status(400).json({
+        timestamp: new Date().toISOString(),
+        status: 400,
+        code: "MISSING_HEADER",
+        message: "Header X-Correlation-Id es requerido",
+        correlationId: "N/A",
+      });
+    }
+
+    req.requestId = requestId;
+    req.correlationId = correlationId;
+    res.setHeader("x-request-id", req.requestId);
+    res.setHeader("x-correlation-id", req.correlationId);
+    console.log(
+      `[${req.method}] ${req.path} | requestId=${req.requestId} | correlationId=${req.correlationId}`
+    );
+  }
+
   next();
 });
 
