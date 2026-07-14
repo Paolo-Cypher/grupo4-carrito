@@ -404,4 +404,4 @@ grupo4-carrito/
 - **P1 (Paolo):** Infraestructura + Supabase + CI/CD
 - **P2 (Mauricio):** Endpoints reales + Manejo de errores
 - **P3 (Benjamin):** Persistencia BD + Migraciones SQL
-- **P4 (Felipe):** Pruebas funcionales + Documentación
+- **P4 (Felipe):** Pruebas funcionales + Documentación.
