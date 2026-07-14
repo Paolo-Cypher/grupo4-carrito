@@ -882,17 +882,15 @@ function parseAddItemRequest(body) {
   if (!body || typeof body.productId !== "string") {
     errors.push({ loc: ["body", "productId"], msg: "productId es requerido" });
   }
-  let quantity = 1;
-  if (body && body.quantity !== undefined) {
-    quantity = body.quantity;
-    if (!Number.isInteger(quantity) || quantity <= 0) {
-      errors.push({ loc: ["body", "quantity"], msg: "quantity debe ser > 0" });
-    }
+  if (!body || body.quantity === undefined || body.quantity === null) {
+    errors.push({ loc: ["body", "quantity"], msg: "quantity es requerido" });
+  } else if (!Number.isInteger(body.quantity) || body.quantity <= 0) {
+    errors.push({ loc: ["body", "quantity"], msg: "quantity debe ser > 0" });
   }
   if (errors.length > 0) {
     throw new ValidationException(errors);
   }
-  return { productId: body.productId, quantity: quantity };
+  return { productId: body.productId, quantity: body.quantity };
 }
 
 function parseCheckoutRequest(body) {

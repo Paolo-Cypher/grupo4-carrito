@@ -265,6 +265,19 @@ describe("POST /cart/:userId/items", () => {
     expect(res.status).toBe(400);
   });
 
+  test("retorna 400 si falta quantity en body", async () => {
+    mockG3ProductFetch("P-100", g3Products["P-100"]);
+
+    const res = await request(app)
+      .post(`/cart/${TEST_USER}/items`)
+      .set("Authorization", `Bearer ${TEST_USER}`)
+      .send({ productId: "P-100" });
+
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe("INVALID_REQUEST");
+    expect(res.body.message).toBe("quantity es requerido");
+  });
+
   test("suma quantity si el mismo productId ya existe", async () => {
     mockG3ProductFetch("P-200", g3Products["P-200"]);
 
