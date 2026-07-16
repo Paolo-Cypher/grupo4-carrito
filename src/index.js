@@ -1257,11 +1257,20 @@ app.post("/checkout", async (req, res) => {
       throw error;
     }
 
-    const orderId = g5Response.orderNumber || g5Response.orderId || g5Response.order_id;
+    // G5 devuelve el UUID del pedido en `id` y el legible en `orderNumber`
+    // (verificado contra el servicio real). G6 necesita el UUID para reconciliar
+    // pagos, así que `id` va primero; el resto son fallbacks defensivos por si
+    // G5 cambia el nombre del campo, y orderNumber evita romper el checkout.
+    const orderId =
+      g5Response.id ||
+      g5Response.orderId ||
+      g5Response.order_id ||
+      g5Response.orderNumber;
+    const orderNumber = g5Response.orderNumber || g5Response.orderId;
 
     if (!orderId) {
       await rollbackCheckout(cartId, idempotencyKey);
-      throw new HttpException(500, "INTERNAL_SERVER_ERROR", "G5 no devolvió orderNumber");
+      throw new HttpException(500, "INTERNAL_SERVER_ERROR", "G5 no devolvió orderId");
     }
 
     await run(
@@ -1274,7 +1283,8 @@ app.post("/checkout", async (req, res) => {
 
     return res.status(201).json({
       attemptId: attemptId,
-      orderId: orderId,
+      orderId: orderId,         // UUID real — lo que necesita G6
+      orderNumber: orderNumber, // legible — solo para mostrar en UI de G1
       uuid: userId,
       status: "SUCCESS",
       message: "Checkout completado exitosamente.",
