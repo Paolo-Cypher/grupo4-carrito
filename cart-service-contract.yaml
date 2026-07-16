@@ -314,6 +314,10 @@ components:
           type: string
           description: ID del pedido devuelto por Grupo 5
           example: "ORD-1001"
+        uuid:
+          type: string
+          description: UUID del usuario devuelto junto con la orden
+          example: "USR-01"
         status:
           type: string
           enum:
