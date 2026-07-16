@@ -1275,6 +1275,7 @@ app.post("/checkout", async (req, res) => {
     return res.status(201).json({
       attemptId: attemptId,
       orderId: orderId,
+      uuid: userId,
       status: "SUCCESS",
       message: "Checkout completado exitosamente.",
     });
